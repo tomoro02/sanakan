@@ -459,6 +459,7 @@ namespace Sanakan.Api.Controllers
                 tags.Add(_tags.GetTag(TagType.Reservation).ToView());
                 tags.Add(_tags.GetTag(TagType.TrashBin).ToView());
 
+                var allGalleryCards = user.GameDeck.GetOrderedGalleryCardsUnlimited(galleryTag.Id);
                 var username = await GetUsernameAsync(user.Shinden);
                 var profile = new UserSiteProfile
                 {
@@ -488,7 +489,8 @@ namespace Sanakan.Api.Controllers
                     ExchangeConditions = user.GameDeck.ExchangeConditions,
                     BackgroundImageUrl = user.GameDeck.BackgroundImageUrl,
                     ForegroundImageUrl = user.GameDeck.ForegroundImageUrl,
-                    Gallery = user.GameDeck.GetOrderedGalleryCards(galleryTag.Id).ToView(username, 0, _time),
+                    CardsTaggedAsGalleryCount = allGalleryCards.Count,
+                    Gallery = allGalleryCards.Take(user.GameDeck.CardsInGallery).ToView(username, 0, _time),
                     DiagnosticMs = countingTimer.ElapsedMilliseconds
                 };
 
