@@ -444,7 +444,8 @@ namespace Sanakan.Api.Controllers
                     {"pvpglobal",       user.GameDeck.GlobalPVPRank},
                     {"pvpseason",       user.IsPVPSeasonalRankActive(_time.Now()) ? user.GameDeck.SeasonalPVPRank : 0},
                     {"kccnt",           cardDetails.TotalKCount},
-                    {"activekccnt",     cardDetails.TotalActiveKCCount}
+                    {"activekccnt",     cardDetails.TotalActiveKCCount},
+                    {"gallerylimit",    user.GameDeck.CardsInGallery},
                 };
 
                 var galleryOrder = string.IsNullOrEmpty(user.GameDeck.GalleryOrderedIds) ? new List<ulong>()
