@@ -515,7 +515,17 @@ namespace Sanakan.Modules
                     await GiveawayCardsAsync(id, count, duration, i, repeat);
                     await Task.Delay(TimeSpan.FromSeconds(10));
                 }
-                catch (Exception) {}
+                catch (Exception ex)
+                {
+                    if (_lotteries.ContainsKey(lid))
+                    {
+                        _lotteries.Remove(lid);
+                        source.Dispose();
+
+                        await SafeReplyAsync("", embed: $"Laud lama w loterii: {ex.Message}".ToEmbedMessage(EMType.Error).Build());
+                        return;
+                    }
+                }
 
                 if (source.Token.IsCancellationRequested)
                 {
@@ -635,13 +645,12 @@ namespace Sanakan.Modules
             var sendMsg = $"Loteria kart. Zareaguj {emote}, aby wziąć udział.\n\nKoniec {time.ToRemTime()}".ToEmbedMessage(EMType.Bot);
             if (progress > -1) sendMsg.Footer = (new EmbedFooterBuilder()).WithText($"{progress+1}/{howMuch}");
             var msg = await SafeReplyAsync(mention, embed: sendMsg.Build());
-            await msg.AddReactionAsync(emote);
+            await SafeAddReactionToMsg(msg, emote);
 
             await Task.Delay(TimeSpan.FromMinutes(duration));
-            await msg.RemoveReactionAsync(emote, Context.Client.CurrentUser);
 
             var reactions = await msg.GetReactionUsersAsync(emote, 300).FlattenAsync();
-            var users = reactions.Shuffle().ToList();
+            var users = reactions.Where(x => !x.IsBot).ToList();
 
             IUser winner = null;
             using (var db = new Database.DatabaseContext(_config))

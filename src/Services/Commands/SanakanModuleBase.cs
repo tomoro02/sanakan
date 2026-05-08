@@ -11,6 +11,7 @@ namespace Sanakan.Services.Commands
     public abstract class SanakanModuleBase<T> : ModuleBase<T> where T : class, ICommandContext
     {
         private const int MAX_SNED_ATTEMPTS = 3;
+        private const int DELAY_MS = 75;
 
         public IConfig Config { get; set; }
 
@@ -23,13 +24,27 @@ namespace Sanakan.Services.Commands
                 {
                     msg = await ReplyAsync(message, isTTS, embed, options, allowedMentions, messageReference, components, stickers, embeds, flags);
                     if (msg != null)
-                        break;
-
-                    await Task.Delay(100);
+                        return msg;
                 }
                 catch (Exception) {}
+                await Task.Delay(DELAY_MS);
             }
             return msg;
+        }
+
+        public async Task<bool> SafeAddReactionToMsg(IUserMessage msg, IEmote emote)
+        {
+            for (int i = 0; i < MAX_SNED_ATTEMPTS; i++)
+            {
+                try
+                {
+                    await msg.AddReactionAsync(emote);
+                    return true;
+                }
+                catch (Exception) {}
+                await Task.Delay(DELAY_MS);
+            }
+            return false;
         }
     }
 }
