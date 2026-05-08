@@ -1361,7 +1361,7 @@ namespace Sanakan.Modules
             if (id == 0)
             {
                 var chart = await _waifu.GetRandomCharacterAsync(CharacterPoolType.All);
-                card = (rarity == Rarity.E && quality == Quality.Broken) ? _waifu.GenerateNewCard(user, chart) : _waifu.GenerateNewCard(user, chart, rarity, quality);
+                card = (rarity == Rarity.E && quality == Quality.Broken) ? _waifu.GenerateNewCard(user, chart.CharInfo) : _waifu.GenerateNewCard(user, chart.CharInfo, rarity, quality);
             }
             else
             {

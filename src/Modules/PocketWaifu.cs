@@ -1319,14 +1319,14 @@ namespace Sanakan.Modules
                 freeCard.EndsAt = _time.Now().AddHours(22);
 
                 var character = await _waifu.GetRandomCharacterAsync(botuser.PoolType);
-                if (character == null)
+                if (character.CharInfo == null)
                 {
-                    await SafeReplyAsync("", embed: "Brak połączania z Shindenem!".ToEmbedMessage(EMType.Error).Build());
+                    await SafeReplyAsync("", embed: $"Brak połączania z Shindenem! ({character.Code})".ToEmbedMessage(EMType.Error).Build());
                     return;
                 }
 
                 botuser.MarkActivity(_time.Now());
-                var card = _waifu.GenerateNewCard(Context.User, character,
+                var card = _waifu.GenerateNewCard(Context.User, character.CharInfo,
                     new List<Rarity>() { Rarity.SS, Rarity.S, Rarity.A });
 
                 bool isOnUserWishlist = await botuser.GameDeck.RemoveCharacterFromWishListAsync(card.Character, db);
@@ -2700,13 +2700,13 @@ namespace Sanakan.Modules
                 for (int i = 0; i < count; i++)
                 {
                     var character = await _waifu.GetRandomCharacterAsync(bUser.PoolType);
-                    if (character == null)
+                    if (character.CharInfo == null)
                     {
-                        await SafeReplyAsync("", embed: "Brak połączania z Shindenem!".ToEmbedMessage(EMType.Error).Build());
+                        await SafeReplyAsync("", embed: $"Brak połączania z Shindenem! ({character.Code})".ToEmbedMessage(EMType.Error).Build());
                         return;
                     }
 
-                    var card = _waifu.GenerateNewCard(Context.User, character);
+                    var card = _waifu.GenerateNewCard(Context.User, character.CharInfo);
                     card.Affection += bUser.GameDeck.AffectionFromKarma();
                     card.Source = CardSource.Tinkering;
                     card.IsTradable = false;

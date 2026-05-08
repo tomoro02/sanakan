@@ -246,13 +246,13 @@ namespace Sanakan.Services.PocketWaifu
         private async Task SpawnCardAsync(ITextChannel spawnChannel, ITextChannel trashChannel, string mention)
         {
             var character = await _waifu.GetRandomCharacterAsync(CharacterPoolType.Anime);
-            if (character == null)
+            if (character.CharInfo == null)
             {
                 _logger.Log("In Satafi: bad shinden connection");
                 return;
             }
 
-            var newCard = _waifu.GenerateNewCard(null, character);
+            var newCard = _waifu.GenerateNewCard(null, character.CharInfo);
             newCard.Source = CardSource.Safari;
             newCard.Affection -= 1.8;
             newCard.InCage = true;
@@ -267,7 +267,7 @@ namespace Sanakan.Services.PocketWaifu
             };
 
             var msg = await spawnChannel.SendMessageAsync(mention, embed: embed.Build());
-            RunSafari(embed, msg, newCard, pokeImage, character, trashChannel);
+            RunSafari(embed, msg, newCard, pokeImage, character.CharInfo, trashChannel);
             await msg.AddReactionAsync(ClaimEmote);
         }
 

@@ -20,6 +20,7 @@ using Shinden.Models;
 using Z.EntityFramework.Plus;
 using System.Threading;
 using Sanakan.Config;
+using System.Net;
 
 namespace Sanakan.Services.PocketWaifu
 {
@@ -1443,7 +1444,7 @@ namespace Sanakan.Services.PocketWaifu
             return idPool.Pool.FirstOrDefault(x => x.Id == id);
         }
 
-        public async Task<ICharacterInfoTitle> GetRandomCharacterAsync(CharacterPoolType type)
+        public async Task<(ICharacterInfoTitle CharInfo, HttpStatusCode Code)> GetRandomCharacterAsync(CharacterPoolType type)
         {
             var idPool = type switch
             {
@@ -1467,19 +1468,22 @@ namespace Sanakan.Services.PocketWaifu
                                 _ => await _shClient.Ex.GetAllCharactersFatAsync(),
                             };
 
-                            if (!characters.IsSuccessStatusCode()) return null;
+                            if (!characters.IsSuccessStatusCode())
+                            {
+                                return (null, characters.Code);
+                            }
 
                             idPool.Update(characters.Body, _time.Now());
                         }
                         catch (Exception)
                         {
-                            return null;
+                            return (null, HttpStatusCode.Gone);
                         }
                     }
                 }
             }
 
-            return idPool.GetOneRandom();
+            return (idPool.GetOneRandom(), HttpStatusCode.OK);
         }
 
         private bool FileIsTooBigToSend(string file)
@@ -1684,9 +1688,9 @@ namespace Sanakan.Services.PocketWaifu
                 else
                 {
                     var chart = await GetRandomCharacterAsync(poolType);
-                    var newCard = GenerateNewCard(user, chart, pack.RarityExcludedFromPack.Select(x => x.Rarity).ToList());
+                    var newCard = GenerateNewCard(user, chart.CharInfo, pack.RarityExcludedFromPack.Select(x => x.Rarity).ToList());
                     if (pack.MinRarity != Rarity.E && i == pack.CardCnt - 1)
-                        newCard = GenerateNewCard(user, chart, pack.MinRarity);
+                        newCard = GenerateNewCard(user, chart.CharInfo, pack.MinRarity);
 
                     newCard.IsTradable = pack.IsCardFromPackTradable;
                     newCard.Source = pack.CardSourceFromPack;
