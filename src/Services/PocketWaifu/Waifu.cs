@@ -1444,7 +1444,7 @@ namespace Sanakan.Services.PocketWaifu
             return idPool.Pool.FirstOrDefault(x => x.Id == id);
         }
 
-        public async Task<(ICharacterInfoTitle CharInfo, HttpStatusCode Code)> GetRandomCharacterAsync(CharacterPoolType type)
+        public async Task<(ICharacterInfoTitle CharInfo, string Code)> GetRandomCharacterAsync(CharacterPoolType type)
         {
             var idPool = type switch
             {
@@ -1470,20 +1470,20 @@ namespace Sanakan.Services.PocketWaifu
 
                             if (!characters.IsSuccessStatusCode())
                             {
-                                return (null, characters.Code);
+                                return (null, characters.Code.ToString());
                             }
 
                             idPool.Update(characters.Body, _time.Now());
                         }
-                        catch (Exception)
+                        catch (Exception ex)
                         {
-                            return (null, HttpStatusCode.Gone);
+                            return (null, $"laud lama: {ex.Message}");
                         }
                     }
                 }
             }
 
-            return (idPool.GetOneRandom(), HttpStatusCode.OK);
+            return (idPool.GetOneRandom(), HttpStatusCode.OK.ToString());
         }
 
         private bool FileIsTooBigToSend(string file)
