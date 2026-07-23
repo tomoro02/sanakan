@@ -236,12 +236,12 @@ namespace Sanakan.Services
         public async Task<Stream> GetSiteStatisticAsync(ulong shindenId, SocketGuildUser user)
         {
             var userInfo = await GetUserInfoAsync(shindenId);
-            if (userInfo is null) return null;
+            if (userInfo.Info is null) throw new Exception(userInfo.Code.ToString());
 
             var resLR = await GetUserLastReadedAsync(shindenId);
             var resLW = await GetUserLastWatchedAsync(shindenId);
 
-            using (var image = await _img.GetSiteStatisticAsync(userInfo,
+            using (var image = await _img.GetSiteStatisticAsync(userInfo.Info,
                 user.Roles.OrderByDescending(x => x.Position).FirstOrDefault()?.Color ?? Discord.Color.DarkerGrey,
                 resLR, resLW))
             {
@@ -273,16 +273,21 @@ namespace Sanakan.Services
             return lr;
         }
 
-        private async Task<IUserInfo> GetUserInfoAsync(ulong shindenId)
+        private async Task<(IUserInfo Info, HttpStatusCode Code)> GetUserInfoAsync(ulong shindenId)
         {
             IUserInfo uInfo = null;
+            var code = HttpStatusCode.InternalServerError;
             try
             {
                 var response = await _shClient.User.GetAsync(shindenId);
-                if (response.IsSuccessStatusCode()) uInfo = response.Body;
+                code = response.Code;
+                if (response.IsSuccessStatusCode())
+                {
+                    uInfo = response.Body;
+                }
             }
             catch (Exception) {}
-            return uInfo;
+            return (uInfo, code);
         }
 
         private async Task<(bool, HttpStatusCode, List<IQuickSearch>)> QuickSearchAsync(string title, QuickSearchType type)

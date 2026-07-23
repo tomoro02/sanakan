@@ -1651,7 +1651,7 @@ namespace Sanakan.Modules
                     return;
                 }
 
-                await Context.Message.AddReactionAsync(new Emoji("👌"));
+                await SafeAddReactionToMsg(Context.Message, new Emoji("👌"));
                 await todoChannel.SendMessageAsync(message.GetJumpUrl(), embed: _moderation.BuildTodo(message, Context.User as SocketGuildUser));
             }
         }
@@ -1675,7 +1675,7 @@ namespace Sanakan.Modules
                 return;
             }
 
-            await Context.Message.AddReactionAsync(new Emoji("👌"));
+            await SafeAddReactionToMsg(Context.Message, new Emoji("👌"));
             await channel2Send.SendMessageAsync(message.GetJumpUrl(), embed: _moderation.BuildTodo(message, Context.User as SocketGuildUser));
         }
 

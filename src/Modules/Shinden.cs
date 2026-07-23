@@ -160,15 +160,14 @@ namespace Sanakan.Modules
                     return;
                 }
 
-                using (var stream = await _shinden.GetSiteStatisticAsync(botUser.Shinden, usr))
+                try
                 {
-                    if (stream == null)
-                    {
-                        await SafeReplyAsync("", embed: $"Brak połączenia z Shindenem!".ToEmbedMessage(EMType.Error).Build());
-                        return;
-                    }
-
+                    using var stream = await _shinden.GetSiteStatisticAsync(botUser.Shinden, usr);
                     await Context.Channel.SendFileAsync(stream, $"{usr.Id}.webp", $"<{Shden.API.Url.GetProfileURL(botUser.Shinden)}>");
+                }
+                catch(Exception ex)
+                {
+                    await SafeReplyAsync("", embed: $"Brak połączenia z Shindenem! ({ex.Message})".ToEmbedMessage(EMType.Error).Build());
                 }
             }
         }

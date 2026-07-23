@@ -35,6 +35,10 @@ namespace Sanakan.Api.Models
         /// </summary>
         public List<CardFinalView> Gallery { get; set; }
         /// <summary>
+        /// Ile jest kart w sumie otagowanych jako galeria
+        /// </summary>
+        public int CardsTaggedAsGalleryCount { get; set; }
+        /// <summary>
         /// Posortowanie galerii - kolejność id kart
         /// </summary>
         public List<ulong> GalleryOrder { get; set; }

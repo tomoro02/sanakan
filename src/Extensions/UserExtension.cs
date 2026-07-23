@@ -530,12 +530,15 @@ namespace Sanakan.Extensions
             _ => deck.Tags.AsEnumerable()
         };
 
-        public static IEnumerable<Card> GetOrderedGalleryCards(this GameDeck deck, ulong galleryTagId)
+        public static List<Card> GetOrderedGalleryCardsUnlimited(this GameDeck deck, ulong galleryTagId)
         {
-            return deck.Cards.Where(x => x.Tags.Any(t => t.Id == galleryTagId)).Take(deck.CardsInGallery)
+            return deck.Cards.Where(x => x.Tags.Any(t => t.Id == galleryTagId))
                 .OrderBy(x => x.Rarity).ThenByDescending(x => x.Quality).ThenByDescending(x => x.BorderOverflow)
-                .ThenBy(x => x.Character).ThenBy(x => x.BorderVariant).ThenBy(x => x.Id);
+                .ThenBy(x => x.Character).ThenBy(x => x.BorderVariant).ThenBy(x => x.Id).ToList();
         }
+
+        public static IEnumerable<Card> GetOrderedGalleryCards(this GameDeck deck, ulong galleryTagId)
+            => deck.GetOrderedGalleryCardsUnlimited(galleryTagId).Take(deck.CardsInGallery);
 
         public static bool IsSupaBad(this GameDeck deck) => deck.Karma <= -5000;
         public static bool CanCreateDemon(this GameDeck deck) => deck.Karma <= -2000;
