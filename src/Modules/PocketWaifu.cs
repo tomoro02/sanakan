@@ -1284,17 +1284,7 @@ namespace Sanakan.Modules
                     botuser.TimeStatuses.Add(freeCard);
                 }
 
-                var ultimateCards = botuser.GameDeck.Cards.Where(x => x.FromFigure).ToList();
-                var cnt = ultimateCards.Count;
-                if (cnt > 5) cnt = 5;
-
-                cnt += ultimateCards.Any(x => x.Quality > Quality.Alpha) ? 1 : 0;
-                cnt += ultimateCards.Any(x => x.Quality > Quality.Gamma) ? 2 : 0;
-                cnt += ultimateCards.Any(x => x.Quality > Quality.Zeta) ? 3 : 0;
-                cnt += ultimateCards.Any(x => x.Quality > Quality.Lambda) ? 5 : 0;
-                if (cnt > 12) cnt = 12;
-
-                var ns = freeCard.Sub(TimeSpan.FromHours(cnt));
+                var ns = freeCard.Sub(TimeSpan.FromHours(botuser.GameDeck.GetFreeCardCooldownReductionHours()));
 
                 if (ns.IsActive(_time.Now()))
                 {
@@ -3962,17 +3952,24 @@ namespace Sanakan.Modules
                     toLong += 0.5;
                 }
 
-                var randEnemy = Services.Fun.GetOneRandomFrom(pvpPlayersInRange).UserId;
-                var denemy = await db.GetUserOrCreateAsync(randEnemy);
-                var euser = Context.Client.GetUser(denemy.Id);
-
-                var activeCards = denemy.GameDeck.Cards.Count(x => x.Active);
-                while (euser == null || activeCards < 1)
+                User denemy = null;
+                SocketUser euser = null;
+                foreach (var candidate in pvpPlayersInRange.Shuffle())
                 {
-                    randEnemy = Services.Fun.GetOneRandomFrom(pvpPlayersInRange).UserId;
-                    denemy = await db.GetUserOrCreateAsync(randEnemy);
-                    activeCards = denemy.GameDeck.Cards.Count(x => x.Active);
-                    euser = Context.Client.GetUser(denemy.Id);
+                    euser = Context.Client.GetUser(candidate.UserId);
+                    if (euser == null) continue;
+
+                    if (!await db.Cards.AsQueryable().AnyAsync(x => x.GameDeckId == candidate.UserId && x.Active))
+                        continue;
+
+                    denemy = await db.GetUserOrCreateAsync(candidate.UserId);
+                    break;
+                }
+
+                if (denemy == null)
+                {
+                    await SafeReplyAsync("", embed: $"{Context.User.Mention} nie udało się znaleźć przeciwnika, spróbuj później.".ToEmbedMessage(EMType.Error).Build());
+                    return;
                 }
 
                 var players = new List<PlayerInfo>
