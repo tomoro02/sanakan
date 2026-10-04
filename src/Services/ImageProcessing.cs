@@ -1408,7 +1408,7 @@ namespace Sanakan.Services
             return characterImg;
         }
 
-        private bool HasDereString(Card card) => card.Quality switch
+        private bool HasDereString(Card card) => card.GetGraphicsQuality() switch
         {
             Quality.Beta => false,
             Quality.Gamma => false,
@@ -1419,16 +1419,17 @@ namespace Sanakan.Services
 
         private string GetCustomBorderString(Card card)
         {
-            switch (card.Quality)
+            var quality = card.GetGraphicsQuality();
+            switch (quality)
             {
                 case Quality.Epsilon:
                 case Quality.Gamma:
                 case Quality.Beta:
                 case Quality.Theta:
-                    return Dir.GetResource($"PW/CG/{card.Quality}/Border/{card.Dere}.png");
+                    return Dir.GetResource($"PW/CG/{quality}/Border/{card.Dere}.png");
 
                 default:
-                    return Dir.GetResource($"PW/CG/{card.Quality}/Border{card.GetCardVariantString()}.png");
+                    return Dir.GetResource($"PW/CG/{quality}/Border{card.GetCardVariantString()}.png");
             }
         }
 
@@ -1440,7 +1441,7 @@ namespace Sanakan.Services
             if (card.FromFigure)
             {
                 borderStr = GetCustomBorderString(card);
-                dereStr = Dir.GetResource($"PW/CG/{card.Quality}/Dere/{card.Dere}{card.GetCardDereVariantString()}.png");
+                dereStr = Dir.GetResource($"PW/CG/{card.GetGraphicsQuality()}/Dere/{card.Dere}{card.GetCardDereVariantString()}.png");
             }
 
             var img = Image.Load(borderStr);
@@ -1449,6 +1450,9 @@ namespace Sanakan.Services
                 using var dere = Image.Load(dereStr);
                 img.Mutate(x => x.DrawImage(dere, new Point(0, 0), 1));
             }
+
+            if (card.FromFigure && card.UsesSigmaFallback())
+                img.Mutate(x => x.Rotate(RotateMode.Rotate180));
 
             return img;
         }
@@ -1592,7 +1596,7 @@ namespace Sanakan.Services
             }
         }
 
-        private void ApplyDeltaStats(Image<Rgba32> image, Card card)
+        private void ApplyDeltaStats(Image<Rgba32> image, Card card, bool rotated = false)
         {
             var hpFont = GetOrCreateFont(_latoBold, 34);
             var adFont = GetOrCreateFont(_latoBold, 26);
@@ -1614,11 +1618,33 @@ namespace Sanakan.Services
                     new ColorStop[] { new ColorStop(0f, GetOrCreateColor("#a8833c")), new ColorStop(0.5f, GetOrCreateColor("#f9eaaf")), new ColorStop(1f, GetOrCreateColor("#a8833c")) });
             }
 
+            if (rotated)
+            {
+                DrawTextOnRotatedCard(image, hpFont, $"{hp}", new PointF(114, 630), hpBrush, -0.46f);
+                DrawTextOnRotatedCard(image, adFont, $"{atk}", new PointF(92, 597), atkBrush);
+                DrawTextOnRotatedCard(image, adFont, $"{def}", new PointF(382, 597), defBrush);
+                return;
+            }
+
             image.Mutate(x => x.DrawText(drOps, hpOps, $"{hp}", hpBrush, null));
             var ops = new RichTextOptions(adFont) { HorizontalAlignment = HorizontalAlignment.Center, Origin = new Point(92, 597)};
             image.Mutate(x => x.DrawText(ops, $"{atk}", atkBrush));
             ops.Origin = new Point(382, 597);
             image.Mutate(x => x.DrawText(ops, $"{def}", defBrush));
+        }
+
+        private static void DrawTextOnRotatedCard(Image<Rgba32> image, Font font, string text, PointF origin, Brush brush, float rotation = 0)
+        {
+            var ops = new RichTextOptions(font) { HorizontalAlignment = HorizontalAlignment.Center, Origin = origin };
+            var bounds = TextMeasurer.MeasureBounds(text, ops);
+            var offset = new Vector2(bounds.X + bounds.Width / 2 - origin.X, bounds.Y + bounds.Height / 2 - origin.Y);
+
+            var center = Vector2.Transform(new Vector2(origin.X, origin.Y) + offset, Matrix3x2.CreateRotation(rotation));
+            var target = new Vector2(image.Width - center.X, image.Height - center.Y);
+
+            ops.Origin = target - offset;
+            var drOps = new DrawingOptions() { Transform = Matrix3x2.CreateRotation(rotation, target) };
+            image.Mutate(x => x.DrawText(drOps, ops, text, brush, null));
         }
 
         private void ApplyEpsilonStats(Image<Rgba32> image, Card card)
@@ -1860,43 +1886,49 @@ namespace Sanakan.Services
         private string GetStatsString(Card card)
         {
             bool isSpecialDere = card.Dere == Dere.Yami || card.Dere == Dere.Yato || card.Dere == Dere.Raito;
-            switch (card.Quality)
+            var quality = card.GetGraphicsQuality();
+            switch (quality)
             {
                 case Quality.Beta:
                 case Quality.Epsilon:
                     return isSpecialDere
-                        ? Dir.GetResource($"PW/CG/{card.Quality}/Stats/{card.Dere}.png")
-                        : Dir.GetResource($"PW/CG/{card.Quality}/Stats.png");
+                        ? Dir.GetResource($"PW/CG/{quality}/Stats/{card.Dere}.png")
+                        : Dir.GetResource($"PW/CG/{quality}/Stats.png");
 
                 case Quality.Gamma:
                 case Quality.Jota:
                 case Quality.Theta:
-                    return Dir.GetResource($"PW/CG/{card.Quality}/Stats/{card.Dere}.png");
+                    return Dir.GetResource($"PW/CG/{quality}/Stats/{card.Dere}.png");
 
                 default:
-                    return Dir.GetResource($"PW/CG/{card.Quality}/Stats{card.GetCardVariantString()}.png");
+                    return Dir.GetResource($"PW/CG/{quality}/Stats{card.GetCardVariantString()}.png");
             }
         }
 
         private string GetBorderBackString(Card card)
         {
-            switch (card.Quality)
+            var quality = card.GetGraphicsQuality();
+            switch (quality)
             {
-                case Quality.Jota: return Dir.GetResource($"PW/CG/{card.Quality}/Border/{card.Dere}.png");
-                default: return Dir.GetResource($"PW/CG/{card.Quality}/BorderBack{card.GetCardVariantString()}.png");
+                case Quality.Jota: return Dir.GetResource($"PW/CG/{quality}/Border/{card.Dere}.png");
+                default: return Dir.GetResource($"PW/CG/{quality}/BorderBack{card.GetCardVariantString()}.png");
             }
         }
 
         private void ApplyUltimateStats(Image<Rgba32> image, Card card)
         {
+            var rotated = card.UsesSigmaFallback();
             var statsStr = GetStatsString(card);
             if (File.Exists(statsStr))
             {
                 using var stats = Image.Load(statsStr);
+                if (rotated)
+                    stats.Mutate(x => x.Rotate(RotateMode.Rotate180));
+
                 image.Mutate(x => x.DrawImage(stats, new Point(0, 0), 1));
             }
 
-            switch (card.Quality)
+            switch (card.GetGraphicsQuality())
             {
                 case Quality.Alpha:
                     ApplyAlphaStats(image, card);
@@ -1908,7 +1940,7 @@ namespace Sanakan.Services
                     ApplyGammaStats(image, card);
                     break;
                 case Quality.Delta:
-                    ApplyDeltaStats(image, card);
+                    ApplyDeltaStats(image, card, rotated);
                     break;
                 case Quality.Epsilon:
                     ApplyEpsilonStats(image, card);
@@ -2020,6 +2052,9 @@ namespace Sanakan.Services
             if (isFromFigureOriginalBorder && File.Exists(backBorderStr))
             {
                 using var back = Image.Load(backBorderStr);
+                if (card.UsesSigmaFallback())
+                    back.Mutate(x => x.Rotate(RotateMode.Rotate180));
+
                 image.Mutate(x => x.DrawImage(back, new Point(0, 0), 1));
             }
         }
