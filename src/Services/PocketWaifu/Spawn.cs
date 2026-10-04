@@ -58,7 +58,10 @@ namespace Sanakan.Services.PocketWaifu
                 var file = GetReader();
                 file.Save(UserCounter);
             }
-            catch (Exception) { }
+            catch (Exception ex)
+            {
+                _logger.LogError($"Spawn: zapis dump.json: {ex.Message}");
+            }
         }
 
         public long HowMuchToPacket(ulong userId)
@@ -93,7 +96,10 @@ namespace Sanakan.Services.PocketWaifu
                     file.Delete();
                 }
             }
-            catch (Exception) { }
+            catch (Exception ex)
+            {
+                _logger.LogError($"Spawn: odczyt dump.json: {ex.Message}");
+            }
         }
 
         private JsonFileReader GetReader() => new Config.JsonFileReader("./dump.json");
@@ -179,7 +185,7 @@ namespace Sanakan.Services.PocketWaifu
                 }
                 catch (Exception ex)
                 {
-                    _logger.Log($"In Safari: {ex}");
+                    _logger.LogError($"In Safari: {ex}");
                     await msg.ModifyAsync(x => x.Embed = "Karta uciekła!".ToEmbedMessage(EMType.Error).Build());
                     await msg.RemoveAllReactionsAsync();
                 }
@@ -207,9 +213,9 @@ namespace Sanakan.Services.PocketWaifu
                     isOnUserWishlist = botUser.GameDeck.RemoveCharacterFromWishList(newCard.Character, db);
                     botUser.GameDeck.Cards.Add(newCard);
 
-                    QueryCacheManager.ExpireTag(new string[] { $"user-{botUser.Id}", "users" });
-
                     await db.SaveChangesAsync();
+
+                    QueryCacheManager.ExpireTag(new string[] { $"user-{botUser.Id}", "users" });
 
                     if (db.AddActivityFromNewCard(newCard, isOnUserWishlist, _time, botUser, winner.GetUserNickInGuild()))
                     {
@@ -237,7 +243,7 @@ namespace Sanakan.Services.PocketWaifu
                     }
                     catch (Exception ex)
                     {
-                        _logger.Log($"In Safari: {ex}");
+                        _logger.LogError($"In Safari: {ex}");
                     }
                 });
             }), winner.Id);
@@ -248,7 +254,7 @@ namespace Sanakan.Services.PocketWaifu
             var character = await _waifu.GetRandomCharacterAsync(CharacterPoolType.Anime);
             if (character.CharInfo == null)
             {
-                _logger.Log("In Satafi: bad shinden connection");
+                _logger.LogError("In Satafi: bad shinden connection");
                 return;
             }
 

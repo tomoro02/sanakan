@@ -22,136 +22,183 @@ using Newtonsoft.Json.Serialization;
 using Microsoft.OpenApi.Models;
 using Sanakan.Services.Time;
 using Asp.Versioning;
+using System;
+using System.Threading.Tasks;
+using Sanakan.Config.Model;
 
 namespace Sanakan.Api
 {
     public static class BotWebHost
     {
+        private const int MinJwtKeyBytes = 32;
+
+        private static IWebHost _host;
+
         public static void RunWebHost(DiscordSocketClient client, ShindenClient shinden, Waifu waifu, IConfig config, Services.Helper helper,
             IExecutor executor, Shinden.Logger.ILogger logger, ISystemTime time, TagHelper tags, Expedition expedition)
         {
+            var host = CreateWebHostBuilder(config).ConfigureServices(services =>
+            {
+                services.AddSingleton(tags);
+                services.AddSingleton(time);
+                services.AddSingleton(waifu);
+                services.AddSingleton(logger);
+                services.AddSingleton(client);
+                services.AddSingleton(helper);
+                services.AddSingleton(shinden);
+                services.AddSingleton(executor);
+                services.AddSingleton(expedition);
+            }).Build();
+
+            _host = host;
             new Thread(() =>
             {
-                Thread.CurrentThread.IsBackground = true;
-                CreateWebHostBuilder(config).ConfigureServices(services =>
+                try
                 {
-                    services.AddSingleton(tags);
-                    services.AddSingleton(time);
-                    services.AddSingleton(waifu);
-                    services.AddSingleton(logger);
-                    services.AddSingleton(client);
-                    services.AddSingleton(helper);
-                    services.AddSingleton(shinden);
-                    services.AddSingleton(executor);
-                    services.AddSingleton(expedition);
-                }).Build().Run();
-            }).Start();
+                    host.Run();
+                }
+                catch (Exception ex)
+                {
+                    logger.LogError($"API przestało działać: {ex}");
+                    Environment.Exit(1);
+                }
+            }) { IsBackground = true }.Start();
+        }
+
+        public static void ValidateConfig(ConfigModel config)
+        {
+            if (config.Jwt == null || string.IsNullOrWhiteSpace(config.Jwt.Key) || Encoding.UTF8.GetByteCount(config.Jwt.Key) < MinJwtKeyBytes)
+                throw new InvalidOperationException($"Jwt.Key musi być ustawiony i mieć co najmniej {MinJwtKeyBytes} bajty");
+
+            if (string.IsNullOrWhiteSpace(config.Jwt.Issuer))
+                throw new InvalidOperationException("Jwt.Issuer musi być ustawiony");
+        }
+
+        public static async Task StopAsync(TimeSpan timeout)
+        {
+            if (_host == null) return;
+
+            try
+            {
+                using var cts = new CancellationTokenSource(timeout);
+                await _host.StopAsync(cts.Token);
+            }
+            catch (OperationCanceledException) { }
         }
 
         private static IWebHostBuilder CreateWebHostBuilder(IConfig config) =>
-            WebHost.CreateDefaultBuilder().ConfigureServices(services =>
-            {
-                var tmpCnf = config.Get();
-                services.AddMemoryCache();
-                services.AddSingleton(config);
-                services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme).AddJwtBearer(opt =>
-                {
-                    opt.TokenValidationParameters = new TokenValidationParameters
-                    {
-                        ValidateIssuer = true,
-                        ValidateAudience = true,
-                        ValidateLifetime = true,
-                        ValidateIssuerSigningKey = true,
-                        ValidIssuer = tmpCnf.Jwt.Issuer,
-                        ValidAudience = tmpCnf.Jwt.Issuer,
-                        IssuerSigningKey = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(tmpCnf.Jwt.Key))
-                    };
-                }).AddScheme<AuthenticationSchemeOptions, UserKeyAuthenticationHandler>(UserKeyAuthenticationHandler.SchemeName, null);
-                services.AddAuthorization(op =>
-                {
-                    op.AddPolicy("Player", policy =>
-                    {
-                        policy.AddAuthenticationSchemes(JwtBearerDefaults.AuthenticationScheme, UserKeyAuthenticationHandler.SchemeName);
-                        policy.RequireAuthenticatedUser();
-
-                        policy.RequireAssertion(context => context.User.HasClaim(c => c.Type == "Player" && c.Value == "waifu_player"));
-                    });
-
-                    op.AddPolicy("Site", policy =>
-                    {
-                        policy.AddAuthenticationSchemes(JwtBearerDefaults.AuthenticationScheme);
-                        policy.RequireAuthenticatedUser();
-
-                        policy.RequireAssertion(context => !context.User.HasClaim(c => c.Type == "Player"));
-                    });
-                });
-                services.AddControllers()
-                    .AddNewtonsoftJson(o => o.SerializerSettings.ReferenceLoopHandling = Newtonsoft.Json.ReferenceLoopHandling.Ignore)
-                    .AddNewtonsoftJson(o => o.SerializerSettings.Converters.Add(new StringEnumConverter { NamingStrategy = new CamelCaseNamingStrategy() }));
-                services.AddCors(options =>
-                {
-                    options.AddPolicy("AllowEverything", builder =>
-                    {
-                        builder.AllowAnyOrigin();
-                        builder.AllowAnyHeader();
-                        builder.AllowAnyMethod();
-                    });
-                });
-                services.AddApiVersioning(o =>
-                {
-                    o.AssumeDefaultVersionWhenUnspecified = true;
-                    o.DefaultApiVersion = new ApiVersion(1, 0);
-                    o.ApiVersionReader = new HeaderApiVersionReader("x-api-version");
-                });
-                services.AddSwaggerGen(c =>
-                {
-                    c.SwaggerDoc("v2", new OpenApiInfo
-                    {
-                        Title = "Sanakan API",
-                        Version = "1.0",
-                        Description = "Autentykacja następuje poprzez dopasowanie tokenu przesłanego w ciele zapytania `api/token`, a następnie wysyłania w nagłowku `Authorization` z przedrostkiem `Bearer` otrzymanego w zwrocie tokena."
-                            + "\n\nEndpointy wymagające użytkownika (`Player`) akceptują również klucz użytkownika przesłany w nagłówku `x-user-key`. Klucze generuje uprawniona aplikacja przez `api/userkey`, podając swój klucz w nagłówku `x-app-key`."
-                            + "\n\nDocelowa wersja api powinna zostać przesłana pod nagówkiem `x-api-version`, w przypadku jej nie podania zapytania są interpretowane jako wysłane do wersji `1.0`.",
-                    });
-
-                    var filePath = Path.Combine(System.AppContext.BaseDirectory, "Sanakan.xml");
-                    if (File.Exists(filePath)) c.IncludeXmlComments(filePath);
-
-                    c.CustomSchemaIds(x => x.FullName);
-                });
-            }).ConfigureLogging(logging =>
+            WebHost.CreateDefaultBuilder().ConfigureServices(services => AddApiServices(services, config))
+            .ConfigureLogging(logging =>
             {
                 logging.ClearProviders();
                 logging.AddSimpleConsole(x => x.ColorBehavior = Microsoft.Extensions.Logging.Console.LoggerColorBehavior.Disabled);
                 logging.SetMinimumLevel(LogLevel.Warning);
             })
-            .Configure(app =>
-            {
-                app.UseSwagger();
-                app.UseCors("AllowEverything");
-                app.UseForwardedHeaders(new ForwardedHeadersOptions { ForwardedHeaders = ForwardedHeaders.XForwardedFor | ForwardedHeaders.XForwardedProto });
-                app.UseStaticFiles();
-                app.UseRouting();
-                app.UseAuthentication();
-                app.UseAuthorization();
-
-                var auditLogger = app.ApplicationServices.GetService<Shinden.Logger.ILogger>();
-                app.Use(async (context, next) =>
-                {
-                    var watch = System.Diagnostics.Stopwatch.StartNew();
-                    await next();
-
-                    var entry = ApiAudit.Describe(context, watch.ElapsedMilliseconds);
-                    if (entry != null) auditLogger?.Log(entry);
-                });
-                app.UseEndpoints(endpoints =>
-                {
-                    endpoints.MapControllers();
-                });
+            .Configure(UseApi)
 #if !DEBUG
-            });
+            ;
 #else
-            }).UseUrls("http://*:5005");
+            .UseUrls("http://*:5005");
 #endif
-            }
+
+        public static void AddApiServices(IServiceCollection services, IConfig config)
+        {
+            var tmpCnf = config.Get();
+            services.AddMemoryCache();
+            services.AddSingleton(config);
+            services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme).AddJwtBearer(opt =>
+            {
+                opt.TokenValidationParameters = new TokenValidationParameters
+                {
+                    ValidateIssuer = true,
+                    ValidateAudience = true,
+                    ValidateLifetime = true,
+                    ValidateIssuerSigningKey = true,
+                    ValidIssuer = tmpCnf.Jwt.Issuer,
+                    ValidAudience = tmpCnf.Jwt.Issuer,
+                    IssuerSigningKey = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(tmpCnf.Jwt.Key))
+                };
+            }).AddScheme<AuthenticationSchemeOptions, UserKeyAuthenticationHandler>(UserKeyAuthenticationHandler.SchemeName, null);
+            services.AddAuthorization(op =>
+            {
+                op.AddPolicy("Player", policy =>
+                {
+                    policy.AddAuthenticationSchemes(JwtBearerDefaults.AuthenticationScheme, UserKeyAuthenticationHandler.SchemeName);
+                    policy.RequireAuthenticatedUser();
+
+                    policy.RequireAssertion(context => context.User.HasClaim(c => c.Type == "Player" && c.Value == "waifu_player"));
+                });
+
+                op.AddPolicy("Site", policy =>
+                {
+                    policy.AddAuthenticationSchemes(JwtBearerDefaults.AuthenticationScheme);
+                    policy.RequireAuthenticatedUser();
+
+                    policy.RequireAssertion(context => !context.User.HasClaim(c => c.Type == "Player"));
+                });
+            });
+            services.AddControllers()
+                .AddNewtonsoftJson(o => o.SerializerSettings.ReferenceLoopHandling = Newtonsoft.Json.ReferenceLoopHandling.Ignore)
+                .AddNewtonsoftJson(o => o.SerializerSettings.Converters.Add(new StringEnumConverter { NamingStrategy = new CamelCaseNamingStrategy() }));
+            services.AddCors(options =>
+            {
+                options.AddPolicy("AllowEverything", builder =>
+                {
+                    builder.AllowAnyOrigin();
+                    builder.AllowAnyHeader();
+                    builder.AllowAnyMethod();
+                });
+            });
+            services.AddApiVersioning(o =>
+            {
+                o.AssumeDefaultVersionWhenUnspecified = true;
+                o.DefaultApiVersion = new ApiVersion(1, 0);
+                o.ApiVersionReader = new HeaderApiVersionReader("x-api-version");
+            });
+            services.AddSwaggerGen(c =>
+            {
+                c.SwaggerDoc("v2", new OpenApiInfo
+                {
+                    Title = "Sanakan API",
+                    Version = "1.0",
+                    Description = "Autentykacja następuje poprzez dopasowanie tokenu przesłanego w ciele zapytania `api/token`, a następnie wysyłania w nagłowku `Authorization` z przedrostkiem `Bearer` otrzymanego w zwrocie tokena."
+                        + "\n\nEndpointy wymagające użytkownika (`Player`) akceptują również klucz użytkownika przesłany w nagłówku `x-user-key`. Klucze generuje uprawniona aplikacja przez `api/userkey`, podając swój klucz w nagłówku `x-app-key`."
+                        + "\n\nDocelowa wersja api powinna zostać przesłana pod nagówkiem `x-api-version`, w przypadku jej nie podania zapytania są interpretowane jako wysłane do wersji `1.0`.",
+                });
+
+                var filePath = Path.Combine(System.AppContext.BaseDirectory, "Sanakan.xml");
+                if (File.Exists(filePath)) c.IncludeXmlComments(filePath);
+
+                c.CustomSchemaIds(x => x.FullName);
+            });
+        }
+
+        public static void UseApi(IApplicationBuilder app)
+        {
+            app.UseSwagger();
+            app.UseCors("AllowEverything");
+            app.UseForwardedHeaders(new ForwardedHeadersOptions { ForwardedHeaders = ForwardedHeaders.XForwardedFor | ForwardedHeaders.XForwardedProto });
+            app.UseStaticFiles();
+            app.UseRouting();
+            app.UseAuthentication();
+            app.UseAuthorization();
+
+            var auditLogger = app.ApplicationServices.GetService<Shinden.Logger.ILogger>();
+            var traffic = new ApiTraffic(x => auditLogger?.Log(x), System.TimeSpan.FromHours(1));
+            app.Use(async (context, next) =>
+            {
+                var watch = System.Diagnostics.Stopwatch.StartNew();
+                await next();
+
+                ApiStats.Add(context);
+                var entry = ApiAudit.Describe(context, watch.ElapsedMilliseconds);
+                if (entry != null) auditLogger?.Log(entry);
+                else traffic.Add(context);
+            });
+            app.UseEndpoints(endpoints =>
+            {
+                endpoints.MapControllers();
+            });
+        }
+    }
 }

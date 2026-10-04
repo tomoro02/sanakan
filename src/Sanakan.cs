@@ -52,6 +52,7 @@ namespace Sanakan
         public async Task MainAsync()
         {
             LoadConfig();
+            ValidateConfig();
             EnsureDbIsCreated();
             CreateModules();
             AddSigTermHandler();
@@ -72,6 +73,19 @@ namespace Sanakan
             await Task.Delay(-1);
         }
 
+        private void ValidateConfig()
+        {
+            try
+            {
+                BotWebHost.ValidateConfig(_config.Get());
+            }
+            catch (InvalidOperationException ex)
+            {
+                Console.Error.WriteLine($"Błąd konfiguracji: {ex.Message}");
+                Environment.Exit(1);
+            }
+        }
+
         private void EnsureDbIsCreated()
         {
             using (var db = new Database.DatabaseContext(_config))
@@ -85,7 +99,12 @@ namespace Sanakan
         {
             Services.Dir.Create();
 
-            _logger = new ConsoleLogger(_config);
+            var discordLogger = new DiscordChannelLogger(new ConsoleLogger(_config), _config);
+            _logger = discordLogger;
+            Database.DbActivity.Start(_logger, TimeSpan.FromHours(1));
+            DailyReport.Start(_logger, Api.ApiStats.FlushDaily, Database.DbActivity.FlushDaily);
+
+            AppDomain.CurrentDomain.ProcessExit += (_, _) => discordLogger.FlushAllAsync(TimeSpan.FromSeconds(5)).GetAwaiter().GetResult();
 
             _client = new DiscordSocketClient(new DiscordSocketConfig()
             {
@@ -97,7 +116,10 @@ namespace Sanakan
 
             _client.Log += log =>
             {
-                _logger.Log(log.ToString());
+                if (log.Severity <= LogSeverity.Error)
+                    _logger.LogError(log.ToString());
+                else
+                    _logger.Log(log.ToString());
                 return Task.CompletedTask;
             };
 
@@ -115,11 +137,11 @@ namespace Sanakan
             _deleted = new DeletedLog(_client, _config);
             _chaos = new Chaos(_client, _config, _logger);
             _executor = new UserBasedExecutor(_logger);
-            _eCounter = new EmoteCounter(_client, _time);
+            _eCounter = new EmoteCounter(_client, _time, _logger);
             _sessions = new SessionManager(_client, _executor, _logger);
             _mod = new Moderator(_logger, _config, _client, _time, _img);
             _daemon = new Daemonizer(_client, _logger, _config);
-            _shinden = new Services.Shinden(_shindenClient, _sessions, _img);
+            _shinden = new Services.Shinden(_shindenClient, _sessions, _img, _logger);
             _waifu = new Waifu(_img, _shindenClient, _events, _logger,
                  _expedition, _client, _helper, _time, _shinden, _tags, _config);
             _supervisor = new Supervisor(_client, _config, _logger, _mod, _time);
@@ -141,12 +163,14 @@ namespace Sanakan
 
         private void AddSigTermHandler()
         {
-            Console.CancelKeyPress += delegate
+            Console.CancelKeyPress += (_, e) =>
             {
+                e.Cancel = true;
                 _ = Task.Run(async () =>
                 {
                     _logger.Log("SIGTERM Received!");
                     await _client.LogoutAsync();
+                    await BotWebHost.StopAsync(TimeSpan.FromSeconds(5));
                     await Task.Delay(1000);
                     Environment.Exit(0);
                 });

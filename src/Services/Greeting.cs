@@ -63,7 +63,7 @@ namespace Sanakan.Services
                 }
                 catch (Exception ex)
                 {
-                    _logger.Log($"Greeting: nie udało się pobrać powodu bana użytkownika {user.Id}: {ex}");
+                    _logger.LogError($"Greeting: nie udało się pobrać powodu bana użytkownika {user.Id}: {ex}");
                 }
 
                 var banMessage = string.IsNullOrWhiteSpace(banReason)
@@ -122,7 +122,7 @@ namespace Sanakan.Services
                 }
                 catch (Exception ex)
                 {
-                    _logger.Log($"Greeting: {ex}");
+                    _logger.LogError($"Greeting: {ex}");
                 }
             }
         }
@@ -167,7 +167,7 @@ namespace Sanakan.Services
                             card.GameDeckId = fakeu.GameDeck.Id;
                         }
 
-                        foreach (var w in duser.GameDeck.Wishes.Where(x => x.Type == Database.Models.WishlistObjectType.Character))
+                        foreach (var w in duser.GameDeck.Wishes.Where(x => x.AffectsWishlistCount()))
                         {
                             await db.WishlistCountData.CreateOrChangeWishlistCountByAsync(w.ObjectId, w.ObjectName, -1, -1);
                         }
@@ -181,7 +181,7 @@ namespace Sanakan.Services
                 }
                 catch (Exception ex)
                 {
-                    _logger.Log("In user leave:" + ex.ToString());
+                    _logger.LogError("In user leave:" + ex.ToString());
                     await SendMessageAsync($"**ERR:** `{user.Id}` {guild.GetRole(adminRoleId)?.Mention}", guild.GetTextChannel(channelId));
                 }
             });
@@ -189,7 +189,6 @@ namespace Sanakan.Services
             await _executor.TryAdd(new Executable("delete user", moveTask, user.Id, Priority.High), TimeSpan.FromSeconds(1));
         }
 
-        // cache członków bywa niepełny (np. po ponownym połączeniu), więc brak w cache potwierdzamy przez REST
         private async Task<bool> IsStillOnAnyGuildAsync(ulong leftGuildId, ulong userId)
         {
             foreach (var guild in _client.Guilds.Where(x => x.Id != leftGuildId))
@@ -204,7 +203,7 @@ namespace Sanakan.Services
                 }
                 catch (Exception ex)
                 {
-                    _logger.Log($"In user leave check g{guild.Id} u{userId}: {ex}");
+                    _logger.LogError($"In user leave check g{guild.Id} u{userId}: {ex}");
                     return true;
                 }
             }

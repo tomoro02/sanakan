@@ -266,7 +266,7 @@ namespace Sanakan.Api.Controllers
         public Task<IActionResult> SetExchangeConditionsAsync([FromBody] string conditions)
         {
             if (conditions?.Length > MaxExchangeConditionsLength)
-                return Task.FromResult("Text too long!".ToResponse(400));
+                return Task.FromResult<IActionResult>("Text too long!".ToResponse(400));
 
             return RunAsPlayerAsync("exchange-conditions", async (db, discordId) =>
             {
@@ -337,7 +337,6 @@ namespace Sanakan.Api.Controllers
                 return "Waifu changed!".ToResponse(200);
             });
 
-        // ta sama kara za zmianę co w poleceniu bota "waifu"
         private static void LowerPreviousWaifusAffection(User buser)
         {
             foreach (var card in buser.GameDeck.Cards.Where(x => x.Character == buser.GameDeck.Waifu))
@@ -410,7 +409,6 @@ namespace Sanakan.Api.Controllers
             }
         }
 
-        // zmiany wykonywane są w kolejce gracza, tak jak polecenia bota, żeby nie nadpisywały się wzajemnie
         private async Task<IActionResult> RunAsPlayerAsync(string name, Func<Database.DatabaseContext, ulong, Task<IActionResult>> action)
         {
             if (!TryGetDiscordId(out var discordId))

@@ -362,7 +362,7 @@ namespace Sanakan.Services.PocketWaifu
                 }
                 catch (Exception ex)
                 {
-                    _logger.Log($"in waifu - clean cards: {ex}");
+                    _logger.LogError($"in waifu - clean cards: {ex}");
                 }
             },
             null,
@@ -507,7 +507,10 @@ namespace Sanakan.Services.PocketWaifu
 
                     }
                 }
-                catch (Exception) { }
+                catch (Exception ex)
+                {
+                    _logger.LogError($"CleanCards: {filePath}: {ex.Message}");
+                }
             }
             return deletedImages;
         }
@@ -785,7 +788,7 @@ namespace Sanakan.Services.PocketWaifu
             }
         }
 
-        public void IncreaseMoneySpentOnCookies(ShopType type, User user, int cost)
+        public void IncreaseMoneySpentOnCookies(ShopType type, User user, long cost)
         {
             switch (type)
             {
@@ -806,7 +809,7 @@ namespace Sanakan.Services.PocketWaifu
             }
         }
 
-        public void IncreaseMoneySpentOnCards(ShopType type, User user, int cost)
+        public void IncreaseMoneySpentOnCards(ShopType type, User user, long cost)
         {
             switch (type)
             {
@@ -827,7 +830,7 @@ namespace Sanakan.Services.PocketWaifu
             }
         }
 
-        public void RemoveMoneyFromUser(ShopType type, User user, int cost)
+        public void RemoveMoneyFromUser(ShopType type, User user, long cost)
         {
             switch (type)
             {
@@ -848,7 +851,9 @@ namespace Sanakan.Services.PocketWaifu
             }
         }
 
-        public bool CheckIfUserCanBuy(ShopType type, User user, int cost)
+        public static long GetShopCost(int itemCount, int unitCost) => (long)itemCount * unitCost;
+
+        public bool CheckIfUserCanBuy(ShopType type, User user, long cost)
         {
             switch (type)
             {
@@ -981,7 +986,7 @@ namespace Sanakan.Services.PocketWaifu
                     break;
             }
 
-            var realCost = itemCount * thisItem.Cost;
+            var realCost = GetShopCost(itemCount, thisItem.Cost);
             string count = (itemCount > 1) ? $" x{itemCount}" : "";
 
             using (var db = new Database.DatabaseContext(config))
@@ -1115,6 +1120,19 @@ namespace Sanakan.Services.PocketWaifu
                 Math.Max(card.Rarity.GetHealthMin(), card.GetHealthMax() + 1));
 
         static public Dere RandomizeDere() => Fun.GetOneRandomFrom(_dereToRandomize);
+
+        static public long RerollDereUntil(Card card, Dere target, long available, Func<Dere> roll)
+        {
+            long used = 0;
+            while (used < available)
+            {
+                ++used;
+                card.Dere = roll();
+                if (card.Dere == target)
+                    break;
+            }
+            return used;
+        }
 
         static public Card GenerateNewCard(string name, string title, string image, Rarity rarity,
             DateTime creationTime)
@@ -1504,7 +1522,7 @@ namespace Sanakan.Services.PocketWaifu
                 }
                 catch (Exception ex)
                 {
-                    _logger.Log($"Sending file: {ex.Message}");
+                    _logger.LogError($"Sending file: {ex.Message}");
                 }
             }
             return url;
@@ -1757,7 +1775,7 @@ namespace Sanakan.Services.PocketWaifu
                 }
                 catch (Exception ex)
                 {
-                    _logger.Log($"Error while generating card {card.Id}: {ex.Message}");
+                    _logger.LogError($"Error while generating card {card.Id}: {ex.Message}");
                 }
             }
 
@@ -1787,7 +1805,10 @@ namespace Sanakan.Services.PocketWaifu
                         File.Delete(tr);
                 }
             }
-            catch (Exception) { }
+            catch (Exception ex)
+            {
+                _logger.LogError($"DeleteCardImageIfExist: card {card.Id}: {ex.Message}");
+            }
         }
 
         private async Task<string> GetCardUrlIfExistAsync(Card card, bool force = false)
@@ -1816,7 +1837,10 @@ namespace Sanakan.Services.PocketWaifu
                 var images = reader.Load<List<SafariImage>>();
                 dImg = Fun.GetOneRandomFrom(images);
             }
-            catch (Exception) { }
+            catch (Exception ex)
+            {
+                _logger.LogError($"GetRandomSarafiImage: {ex.Message}");
+            }
 
             return dImg;
         }
@@ -1860,7 +1884,7 @@ namespace Sanakan.Services.PocketWaifu
                 }
                 catch (Exception ex)
                 {
-                    _logger.Log($"Sending file: {ex.Message}");
+                    _logger.LogError($"Sending file: {ex.Message}");
                 }
             }
             return url;
@@ -2762,15 +2786,7 @@ namespace Sanakan.Services.PocketWaifu
                         if (targetDere == Dere.Yato || targetDere == Dere.Yami || targetDere == Dere.Raito)
                             return ExecutionResult.FromError("nie można zmienić charaketru na ten który został wybrany!");
 
-                        int usedItems = 1;
-                        for (; usedItems < item.Count; usedItems++)
-                        {
-                            card.Dere = RandomizeDere();
-                            if (card.Dere == targetDere)
-                                break;
-                        }
-
-                        itemCnt = usedItems;
+                        itemCnt = (int)RerollDereUntil(card, targetDere, item.Count, RandomizeDere);
                         karmaChange *= itemCnt;
                         affectionInc *= itemCnt;
                         str.Append($"Użyto {itemCnt} przedmiotów by osiągnać cel!\n");
