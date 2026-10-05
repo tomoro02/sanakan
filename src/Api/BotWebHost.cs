@@ -35,7 +35,7 @@ namespace Sanakan.Api
         private static IWebHost _host;
 
         public static void RunWebHost(DiscordSocketClient client, ShindenClient shinden, Waifu waifu, IConfig config, Services.Helper helper,
-            IExecutor executor, Shinden.Logger.ILogger logger, ISystemTime time, TagHelper tags, Expedition expedition)
+            IExecutor executor, Shinden.Logger.ILogger logger, ISystemTime time, TagHelper tags, Expedition expedition, HealthMonitor health)
         {
             var host = CreateWebHostBuilder(config).ConfigureServices(services =>
             {
@@ -48,6 +48,7 @@ namespace Sanakan.Api
                 services.AddSingleton(shinden);
                 services.AddSingleton(executor);
                 services.AddSingleton(expedition);
+                services.AddSingleton(health);
             }).Build();
 
             _host = host;
@@ -118,7 +119,8 @@ namespace Sanakan.Api
                     ValidAudience = tmpCnf.Jwt.Issuer,
                     IssuerSigningKey = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(tmpCnf.Jwt.Key))
                 };
-            }).AddScheme<AuthenticationSchemeOptions, UserKeyAuthenticationHandler>(UserKeyAuthenticationHandler.SchemeName, null);
+            }).AddScheme<AuthenticationSchemeOptions, UserKeyAuthenticationHandler>(UserKeyAuthenticationHandler.SchemeName, null)
+              .AddScheme<AuthenticationSchemeOptions, AppKeyAuthenticationHandler>(AppKeyAuthenticationHandler.SchemeName, null);
             services.AddAuthorization(op =>
             {
                 op.AddPolicy("Player", policy =>
@@ -131,10 +133,18 @@ namespace Sanakan.Api
 
                 op.AddPolicy("Site", policy =>
                 {
-                    policy.AddAuthenticationSchemes(JwtBearerDefaults.AuthenticationScheme);
+                    policy.AddAuthenticationSchemes(JwtBearerDefaults.AuthenticationScheme, AppKeyAuthenticationHandler.SchemeName);
                     policy.RequireAuthenticatedUser();
 
-                    policy.RequireAssertion(context => !context.User.HasClaim(c => c.Type == "Player"));
+                    policy.RequireAssertion(context => AppKeyAuthenticationHandler.IsAllowed(context.User, ApiAppPermission.Site));
+                });
+
+                op.AddPolicy("Info", policy =>
+                {
+                    policy.AddAuthenticationSchemes(JwtBearerDefaults.AuthenticationScheme, AppKeyAuthenticationHandler.SchemeName);
+                    policy.RequireAuthenticatedUser();
+
+                    policy.RequireAssertion(context => AppKeyAuthenticationHandler.IsAllowed(context.User, ApiAppPermission.Info));
                 });
             });
             services.AddControllers()
@@ -161,9 +171,10 @@ namespace Sanakan.Api
                 {
                     Title = "Sanakan API",
                     Version = "1.0",
-                    Description = "Autentykacja następuje poprzez dopasowanie tokenu przesłanego w ciele zapytania `api/token`, a następnie wysyłania w nagłowku `Authorization` z przedrostkiem `Bearer` otrzymanego w zwrocie tokena."
-                        + "\n\nEndpointy wymagające użytkownika (`Player`) akceptują również klucz użytkownika przesłany w nagłówku `x-user-key`. Klucze generuje uprawniona aplikacja przez `api/userkey`, podając swój klucz w nagłówku `x-app-key`."
-                        + "\n\nDocelowa wersja api powinna zostać przesłana pod nagówkiem `x-api-version`, w przypadku jej nie podania zapytania są interpretowane jako wysłane do wersji `1.0`.",
+                    Description = "Autentykacja następuje poprzez dopasowanie tokenu przesłanego w ciele zapytania `api/token`, a następnie wysyłania w nagłówku `Authorization` z przedrostkiem `Bearer` otrzymanego w zwrocie tokena."
+                        + "\n\nEndpointy wymagające użytkownika (`Player`) akceptują również klucz użytkownika przesłany w nagłówku `x-user-key`. Klucze generuje aplikacja z uprawnieniem `UserKeys` przez `api/userkey`, podając swój klucz w nagłówku `x-app-key`."
+                        + "\n\nEndpointy z polityką `Info` (polecenia moderatorskie, uprawnienia użytkowników) akceptują poza tokenem strony również klucz aplikacji z uprawnieniem `Info` przesłany w nagłówku `x-app-key`. Klucz aplikacji z uprawnieniem `Site` daje dostęp do wszystkich endpointów strony (`Site` i `Info`)."
+                        + "\n\nDocelowa wersja api powinna zostać przesłana pod nagłówkiem `x-api-version`, w przypadku jej niepodania zapytania są interpretowane jako wysłane do wersji `1.0`.",
                 });
 
                 var filePath = Path.Combine(System.AppContext.BaseDirectory, "Sanakan.xml");
@@ -189,6 +200,7 @@ namespace Sanakan.Api
             {
                 var watch = System.Diagnostics.Stopwatch.StartNew();
                 await next();
+                if (context.Request.Path.StartsWithSegments("/api/health")) return;
 
                 ApiStats.Add(context);
                 var entry = ApiAudit.Describe(context, watch.ElapsedMilliseconds);

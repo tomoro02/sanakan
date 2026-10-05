@@ -2,6 +2,7 @@
 
 using System.Collections.Generic;
 using System.Threading.Tasks;
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Discord.Commands;
 using System.Linq;
@@ -27,7 +28,7 @@ namespace Sanakan.Api.Controllers
         }
 
         /// <summary>
-        /// Pobiera publiczną liste poleceń bota
+        /// Pobiera publiczną listę poleceń bota
         /// </summary>
         /// <response code="500">Internal Server Error</response>
         [HttpGet("commands")]
@@ -39,6 +40,27 @@ namespace Sanakan.Api.Controllers
                 {
                     Prefix = _config.Get().Prefix,
                     Modules = GetInfoAboutModules(_helper.PublicModulesInfo)
+                };
+            }
+            catch(Exception ex)
+            {
+                return ex.Message.ToResponse(500);
+            }
+        }
+
+        /// <summary>
+        /// Pobiera listę poleceń moderatorskich i debug bota (token strony lub nagłówek x-app-key z uprawnieniem Info)
+        /// </summary>
+        /// <response code="500">Internal Server Error</response>
+        [HttpGet("commands/private"), Authorize(Policy = "Info")]
+        public async Task<ActionResult<Commands>> GetPrivateCommandsInfoAsync()
+        {
+            try
+            {
+                return new Commands
+                {
+                    Prefix = _config.Get().Prefix,
+                    Modules = GetInfoAboutModules(_helper.PrivateModulesInfo.Values)
                 };
             }
             catch(Exception ex)

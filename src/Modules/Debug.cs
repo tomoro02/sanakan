@@ -186,7 +186,7 @@ namespace Sanakan.Modules
         }
 
         [Command("reckc"), RequireDev]
-        [Summary("przelicza kc dla kazdej postaci z wishlisty")]
+        [Summary("przelicza kc dla każdej postaci z wishlisty")]
         [Remarks("")]
         public async Task RecalculateKCAsync()
         {
@@ -272,7 +272,7 @@ namespace Sanakan.Modules
         }
 
         [Command("show blacklist", RunMode = RunMode.Async), RequireDevOrTester]
-        [Summary("wypisuje listę użytkowników na czarnej liśćie")]
+        [Summary("wypisuje listę użytkowników na czarnej liście")]
         [Remarks("")]
         public async Task ShowBlacklistedUsersAsync()
         {
@@ -481,7 +481,7 @@ namespace Sanakan.Modules
 
                 QueryCacheManager.ExpireTag(new string[] { $"users" });
 
-                await SafeReplyAsync("", embed: $"Zmieniono karte.".ToEmbedMessage(EMType.Success).Build());
+                await SafeReplyAsync("", embed: $"Zmieniono kartę.".ToEmbedMessage(EMType.Success).Build());
             }
         }
 
@@ -572,7 +572,7 @@ namespace Sanakan.Modules
         }
 
         [Command("test lrt"), RequireDevOrTester]
-        [Summary("odpala długo wykonującego się polecenie")]
+        [Summary("odpala długo wykonujące się polecenie")]
         [Remarks("30")]
         public async Task StartLongRunningTaskAsync([Summary("czas działania w sekundach")]uint time = 30)
         {
@@ -582,7 +582,7 @@ namespace Sanakan.Modules
         }
 
         [Command("test wlrt"), RequireDevOrTester]
-        [Summary("odpala długo wykonującego się polecenie z dodatkowym userem")]
+        [Summary("odpala długo wykonujące się polecenie z dodatkowym userem")]
         [Remarks("Jeeda 30")]
         public async Task StartLongRunningTaskWithUserAsync([Summary("nazwa użytkownika")]SocketGuildUser user, [Summary("czas działania w sekundach")]uint time = 30)
         {
@@ -593,7 +593,7 @@ namespace Sanakan.Modules
         }
 
         [Command("test mlrt", RunMode = RunMode.Async), RequireDevOrTester]
-        [Summary("odpala długo wykonującego się polecenie należące do kilku osób")]
+        [Summary("odpala długo wykonujące się polecenie należące do kilku osób")]
         [Remarks("30 1 2 3")]
         public async Task StartMultiLongRunningTaskAsync([Summary("czas działania w sekundach")]uint time = 30,  [Summary("id")]params ulong[] ids)
         {
@@ -616,7 +616,7 @@ namespace Sanakan.Modules
         }
 
         [Command("test glrt", RunMode = RunMode.Async), RequireDevOrTester]
-        [Summary("odpala długo wykonującego się polecenie blokujące globalnie")]
+        [Summary("odpala długo wykonujące się polecenie blokujące globalnie")]
         [Remarks("30")]
         public async Task StartMultiLongRunningGlobalTaskAsync([Summary("czas działania w sekundach")]uint time = 30)
         {
@@ -673,7 +673,7 @@ namespace Sanakan.Modules
 
                     if (users.Count < 1)
                     {
-                        await msg.ModifyAsync(x => x.Embed = "Na loterie nie stawił się żaden użytkownik!".ToEmbedMessage(EMType.Error).Build());
+                        await msg.ModifyAsync(x => x.Embed = "Na loterię nie stawił się żaden użytkownik!".ToEmbedMessage(EMType.Error).Build());
                         return;
                     }
 
@@ -754,7 +754,7 @@ namespace Sanakan.Modules
                     QueryCacheManager.ExpireTag(new string[] { $"user-{Context.User.Id}", "users", $"user-{id}" });
 
                     var msgType = wonSSS ? EMType.Warning : EMType.Success;
-                    var embToSend =  $"Loterie wygrywa {winner.Mention} i otrzymuje:\n\n{string.Join("\n", cardsIds.OrderBy(x => x))}".TrimToLength().ToEmbedMessage(msgType);
+                    var embToSend =  $"Loterię wygrywa {winner.Mention} i otrzymuje:\n\n{string.Join("\n", cardsIds.OrderBy(x => x))}".TrimToLength().ToEmbedMessage(msgType);
                     if (progress > -1) embToSend.Footer = new EmbedFooterBuilder().WithText($"{progress+1}/{howMuch}");
                     msg = await SafeReplyAsync(embed: embToSend.Build());
 
@@ -1246,7 +1246,7 @@ namespace Sanakan.Modules
         }
 
         [Command("ukapps"), Priority(1), RequireDev]
-        [Summary("wyświetla aplikacje mogące generować klucze użytkowników")]
+        [Summary("wyświetla aplikacje z kluczem x-app-key i ich uprawnienia")]
         [Remarks("")]
         public async Task ShowUserKeyAppsAsync()
         {
@@ -1262,13 +1262,13 @@ namespace Sanakan.Modules
                 var counts = await db.UserApiKeys.AsQueryable().GroupBy(x => x.Application)
                     .Select(x => new { App = x.Key, Count = x.Count() }).ToListAsync();
 
-                var list = apps.Select(x => $"**{x.Bearer}** `{MaskKey(x.Key)}` kluczy: {counts.FirstOrDefault(c => c.App == x.Bearer)?.Count ?? 0}");
-                await SafeReplyAsync("", embed: $"**Aplikacje kluczy użytkowników:**\n\n{string.Join("\n", list)}".TrimToLength().ToEmbedMessage(EMType.Info).Build());
+                var list = apps.Select(x => $"**{x.Bearer}** `{MaskKey(x.Key)}` uprawnienia: `{x.Permissions}` kluczy: {counts.FirstOrDefault(c => c.App == x.Bearer)?.Count ?? 0}");
+                await SafeReplyAsync("", embed: $"**Aplikacje (x-app-key):**\n\n{string.Join("\n", list)}".TrimToLength().ToEmbedMessage(EMType.Info).Build());
             }
         }
 
         [Command("ukapp add"), Priority(1), RequireDev]
-        [Summary("dodaje aplikację mogącą generować klucze użytkowników lub zmienia jej klucz (klucz idzie na PW)")]
+        [Summary("dodaje aplikację (domyślnie z uprawnieniem UserKeys) lub zmienia jej klucz zachowując uprawnienia (klucz idzie na PW)")]
         [Remarks("strona")]
         public async Task AddUserKeyAppAsync([Summary("nazwa aplikacji")] string name)
         {
@@ -1291,9 +1291,10 @@ namespace Sanakan.Modules
             }
 
             var config = Config.Get();
-            var exists = config.UserKeyApps?.Any(x => x.Bearer == name) ?? false;
-            var apps = (config.UserKeyApps ?? new List<SanakanApiKey>()).Where(x => x.Bearer != name).ToList();
-            apps.Add(new SanakanApiKey { Key = key, Bearer = name });
+            var existing = config.UserKeyApps?.FirstOrDefault(x => x.Bearer == name);
+            var exists = existing != null;
+            var apps = (config.UserKeyApps ?? new List<ApiApp>()).Where(x => x.Bearer != name).ToList();
+            apps.Add(new ApiApp { Key = key, Bearer = name, Permissions = existing?.Permissions ?? ApiAppPermission.UserKeys });
 
             config.UserKeyApps = apps;
             Config.Save();
@@ -1325,6 +1326,30 @@ namespace Sanakan.Modules
 
                 await SafeReplyAsync("", embed: $"Usunięto aplikację **{name}** i `{keys.Count}` kluczy użytkowników.".ToEmbedMessage(EMType.Success).Build());
             }
+        }
+
+        [Command("ukapp perm"), Priority(1), RequireDev]
+        [Summary("przełącza uprawnienie aplikacji (UserKeys - generowanie i używanie kluczy użytkowników, Info - polecenia moderatorskie i uprawnienia użytkowników, Site - wszystko co strona)")]
+        [Remarks("strona Info")]
+        public async Task ToggleUserKeyAppPermissionAsync([Summary("nazwa aplikacji")] string name, [Summary("uprawnienie")] ApiAppPermission permission)
+        {
+            var app = Config.Get().UserKeyApps?.FirstOrDefault(x => x.Bearer == name);
+            if (app == null)
+            {
+                await SafeReplyAsync("", embed: $"Nie odnaleziono aplikacji **{name}**.".ToEmbedMessage(EMType.Error).Build());
+                return;
+            }
+
+            if (permission == ApiAppPermission.None)
+            {
+                await SafeReplyAsync("", embed: "Podaj konkretne uprawnienie.".ToEmbedMessage(EMType.Error).Build());
+                return;
+            }
+
+            app.Permissions ^= permission;
+            Config.Save();
+
+            await SafeReplyAsync("", embed: $"Uprawnienia aplikacji **{name}**: `{app.Permissions}`".ToEmbedMessage(EMType.Success).Build());
         }
 
         private static string MaskKey(string key)
@@ -1391,7 +1416,7 @@ namespace Sanakan.Modules
         }
 
         [Command("devr", RunMode = RunMode.Async), RequireDev]
-        [Summary("przyznaje lub odbiera role developera")]
+        [Summary("przyznaje lub odbiera rolę developera")]
         [Remarks("")]
         public async Task ToggleDeveloperRoleAsync()
         {
@@ -1404,12 +1429,12 @@ namespace Sanakan.Modules
             if (user.Roles.Contains(devr))
             {
                 await user.RemoveRoleAsync(devr);
-                await SafeReplyAsync("", embed: $"{user.Mention} stracił role deva.".ToEmbedMessage(EMType.Success).Build());
+                await SafeReplyAsync("", embed: $"{user.Mention} stracił rolę deva.".ToEmbedMessage(EMType.Success).Build());
             }
             else
             {
                 await user.AddRoleAsync(devr);
-                await SafeReplyAsync("", embed: $"{user.Mention} otrzymał role deva.".ToEmbedMessage(EMType.Success).Build());
+                await SafeReplyAsync("", embed: $"{user.Mention} otrzymał rolę deva.".ToEmbedMessage(EMType.Success).Build());
             }
         }
 
@@ -1461,8 +1486,8 @@ namespace Sanakan.Modules
         [Command("gcard"), Priority(1), RequireDev]
         [Summary("generuje kartę i daje ją użytkownikowi")]
         [Remarks("Sniku 54861")]
-        public async Task GenerateCardAsync([Summary("nazwa użytkownika")]SocketGuildUser user, [Summary("id postaci na shinden (nie podanie - losowo)")]ulong id = 0,
-            [Summary("ranga karty (nie podanie - losowo)")]Rarity rarity = Rarity.E, [Summary("jakość karty (nadpisuje range)")]Quality quality = Quality.Broken)
+        public async Task GenerateCardAsync([Summary("nazwa użytkownika")]SocketGuildUser user, [Summary("id postaci na shinden (niepodanie - losowo)")]ulong id = 0,
+            [Summary("ranga karty (niepodanie - losowo)")]Rarity rarity = Rarity.E, [Summary("jakość karty (nadpisuje rangę)")]Quality quality = Quality.Broken)
         {
             Card card;
             if (id == 0)
@@ -1493,7 +1518,7 @@ namespace Sanakan.Modules
         }
 
         [Command("gfcard"), Priority(1), RequireDev]
-        [Summary("generuje kartę nieistneijącej postaci i daje ją użytkownikowi")]
+        [Summary("generuje kartę nieistniejącej postaci i daje ją użytkownikowi")]
         [Remarks("Sniku")]
         public async Task GenerateFakeCardAsync([Summary("nazwa użytkownika")]SocketGuildUser user, [Summary("nazwa")]string name, [Summary("tytuł")]string title)
         {
@@ -1589,7 +1614,7 @@ namespace Sanakan.Modules
         }
 
         [Command("setr"), Priority(1), RequireDev]
-        [Summary("zamienia ustawia restarty na karcie")]
+        [Summary("ustawia restarty na karcie")]
         [Remarks("54861 100")]
         public async Task ChangeDereOnCardAsync([Summary("WID")]ulong id, [Summary("liczba restartów")]uint rst)
         {
@@ -1937,7 +1962,7 @@ namespace Sanakan.Modules
         }
 
         [Command("rmconfig", RunMode = RunMode.Async), RequireDev]
-        [Summary("wyświetla konfiguracje powiadomień na obecnym serwerze")]
+        [Summary("wyświetla konfigurację powiadomień na obecnym serwerze")]
         [Remarks("")]
         public async Task ShowRMConfigAsync()
         {
