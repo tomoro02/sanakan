@@ -13,7 +13,7 @@ using System.Threading.Tasks;
 
 namespace Sanakan.Services.Session
 {
-    public class SessionManager
+    public class SessionManager : IDisposable
     {
         private DiscordSocketClient _client;
         private IServiceProvider _provider;
@@ -23,6 +23,7 @@ namespace Sanakan.Services.Session
 
         private readonly object _lock = new object();
         private readonly List<ISession> _sessions = new List<ISession>();
+        private readonly SemaphoreSlim _autoValidate = new SemaphoreSlim(1, 1);
 
         public SessionManager(DiscordSocketClient client, IExecutor executor, ILogger logger)
         {
@@ -37,7 +38,17 @@ namespace Sanakan.Services.Session
 
             _timer = new Timer(async _ =>
             {
-                await AutoValidate();
+                if (!_autoValidate.Wait(0))
+                    return;
+
+                try
+                {
+                    await AutoValidate();
+                }
+                finally
+                {
+                    _autoValidate.Release();
+                }
             },
             null,
             TimeSpan.FromSeconds(5),
@@ -133,8 +144,15 @@ namespace Sanakan.Services.Session
                     case RunMode.Async:
                         _ = Task.Run(async () =>
                         {
-                            if (await session.GetExecutable(context).ExecuteAsync(_provider).ConfigureAwait(false))
-                                await DisposeAsync(session).ConfigureAwait(false);
+                            try
+                            {
+                                if (await session.GetExecutable(context).ExecuteAsync(_provider).ConfigureAwait(false))
+                                    await DisposeAsync(session).ConfigureAwait(false);
+                            }
+                            catch (Exception ex)
+                            {
+                                _logger.LogError($"Sessions: {session.GetEventType()}-{session.GetOwner().Id}: {ex}");
+                            }
                         });
                         break;
 
@@ -245,6 +263,12 @@ namespace Sanakan.Services.Session
             {
                 _logger.LogError($"Session: autovalidate error {ex}");
             }
+        }
+
+        public void Dispose()
+        {
+            _timer?.Dispose();
+            _autoValidate.Dispose();
         }
     }
 }

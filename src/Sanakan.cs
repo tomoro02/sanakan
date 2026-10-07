@@ -34,6 +34,7 @@ namespace Sanakan
         private ImageProcessing _img;
         private DeletedLog _deleted;
         private HealthMonitor _health;
+        private Heartbeat _heartbeat;
         private Daemonizer _daemon;
         private Greeting _greeting;
         private ISystemTime _time;
@@ -54,7 +55,9 @@ namespace Sanakan
         {
             LoadConfig();
             ValidateConfig();
-            EnsureDbIsCreated();
+
+            await EnsureDbIsCreatedAsync();
+
             CreateModules();
             AddSigTermHandler();
 
@@ -64,12 +67,14 @@ namespace Sanakan
             await _client.StartAsync();
 
             var services = BuildServiceProvider();
-            BotWebHost.RunWebHost(_client, _shindenClient, _waifu,
-                _config, _helper, _executor, _logger, _time, _tags, _expedition, _health);
-
             _executor.Initialize(services);
             _sessions.Initialize(services);
             await _handler.InitializeAsync(services, _helper);
+
+            BotWebHost.RunWebHost(_client, _shindenClient, _waifu,
+                _config, _helper, _executor, _logger, _time, _tags, _expedition, _health);
+
+            _heartbeat.Start();
 
             await Task.Delay(-1);
         }
@@ -87,12 +92,12 @@ namespace Sanakan
             }
         }
 
-        private void EnsureDbIsCreated()
+        private async Task EnsureDbIsCreatedAsync()
         {
             using (var db = new Database.DatabaseContext(_config))
             {
                 db.Database.EnsureCreated();
-                _tags = new TagHelper(db);
+                _tags = await TagHelper.CreateAsync(db);
             }
         }
 
@@ -130,13 +135,14 @@ namespace Sanakan
                 LogLevel.Information, tmpCnf.Shinden.BaseUri, TimeSpan.FromSeconds(10));
 
             _health = new HealthMonitor(_client, _shindenClient, _config);
+            _heartbeat = new Heartbeat(_health.GetAsync, _config, _logger);
             _time = new SystemTime();
             _events = new Events(_time);
             _helper = new Helper(_config, _logger);
             _expedition = new Expedition(_time);
             _img = new ImageProcessing(_shindenClient,
                 _tags.GetTag(Services.PocketWaifu.TagType.Gallery));
-            _deleted = new DeletedLog(_client, _config);
+            _deleted = new DeletedLog(_client, _config, _logger);
             _chaos = new Chaos(_client, _config, _logger);
             _executor = new UserBasedExecutor(_logger);
             _eCounter = new EmoteCounter(_client, _time, _logger);
@@ -148,7 +154,7 @@ namespace Sanakan
                  _expedition, _client, _helper, _time, _shinden, _tags, _config);
             _supervisor = new Supervisor(_client, _config, _logger, _mod, _time);
             _greeting = new Greeting(_client, _logger, _config, _executor, _time);
-            _exp = new ExperienceManager(_client, _executor, _config, _img, _time);
+            _exp = new ExperienceManager(_client, _executor, _config, _img, _time, _logger);
             _spawn = new Spawn(_client, _executor, _waifu, _config, _logger, _time);
             _handler = new CommandHandler(_client, _config, _logger, _executor, _time);
             _profile = new Profile(_client, _shindenClient, _img, _logger, _config, _time, _executor);
@@ -159,7 +165,7 @@ namespace Sanakan
 #if !DEBUG
             _config = new ConfigManager("Config.json");
 #else
-            _config = new ConfigManager("ConfigDebug.json");
+            _config = new ConfigManager("ConfigDebug.json", true);
 #endif
         }
 
@@ -184,6 +190,7 @@ namespace Sanakan
             return new ServiceCollection()
                 .AddSingleton<IExecutor>(_executor)
                 .AddSingleton(_shindenClient)
+                .AddSingleton(_heartbeat)
                 .AddSingleton(_expedition)
                 .AddSingleton(_sessions)
                 .AddSingleton(_eCounter)

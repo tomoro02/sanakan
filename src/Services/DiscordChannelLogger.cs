@@ -20,6 +20,7 @@ namespace Sanakan.Services
         private const int MaxPending = 2000;
         private const int MaxMessagesPerFlush = 5;
         private static readonly TimeSpan FlushInterval = TimeSpan.FromSeconds(5);
+        private static readonly TimeSpan MissingChannelRetry = TimeSpan.FromMinutes(15);
 
         private const string BlockStart = "```ansi\n";
         private const string BlockEnd = "\n```";
@@ -56,6 +57,8 @@ namespace Sanakan.Services
 
         private ITextChannel _channel;
         private ulong _missingChannelId;
+        private long _missingChannelRetryAt;
+        private int _disposed;
 
         public DiscordChannelLogger(ConsoleLogger console, IConfig config)
         {
@@ -119,6 +122,24 @@ namespace Sanakan.Services
             {
                 _console.Log($"DiscordLog: {ex.Message}");
             }
+
+            await DisposeRestAsync().ConfigureAwait(false);
+        }
+
+        // DiscordRestClient trzymany przez cala zycie bota - zamykamy go przy zamknieciu
+        private async Task DisposeRestAsync()
+        {
+            if (Interlocked.Exchange(ref _disposed, 1) != 0)
+                return;
+
+            try
+            {
+                if (_rest.LoginState == LoginState.LoggedIn)
+                    await _rest.LogoutAsync().ConfigureAwait(false);
+            }
+            catch { }
+
+            _rest.Dispose();
         }
 
         public static List<string> Pack(Queue<string> pending, string header, int maxMessages, int maxLength = MaxMessageLength)
@@ -163,7 +184,18 @@ namespace Sanakan.Services
         private bool IsEnabled()
         {
             var cfg = _config?.Get()?.LogChannel;
-            return cfg != null && cfg.GuildId != 0 && cfg.ChannelId != 0 && cfg.ChannelId != _missingChannelId;
+            if (cfg == null || cfg.GuildId == 0 || cfg.ChannelId == 0)
+                return false;
+
+            if (cfg.ChannelId == _missingChannelId)
+            {
+                if (Environment.TickCount64 < Volatile.Read(ref _missingChannelRetryAt))
+                    return false;
+
+                _missingChannelId = 0;
+            }
+
+            return true;
         }
 
         private async Task FlushAsync()
@@ -232,6 +264,7 @@ namespace Sanakan.Services
             if (channel == null || channel.GuildId != cfg.GuildId)
             {
                 _missingChannelId = cfg.ChannelId;
+                Volatile.Write(ref _missingChannelRetryAt, Environment.TickCount64 + (long)MissingChannelRetry.TotalMilliseconds);
                 lock (_lock)
                 {
                     _pending.Clear();

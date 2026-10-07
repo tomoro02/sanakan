@@ -1,6 +1,7 @@
 #pragma warning disable 1591
 
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Linq;
@@ -28,8 +29,9 @@ namespace Sanakan.Services.PocketWaifu
         private IConfig _config;
         private Waifu _waifu;
 
-        private Dictionary<ulong, long> ServerCounter;
-        private Dictionary<ulong, long> UserCounter;
+        private ConcurrentDictionary<ulong, long> ServerCounter;
+        private ConcurrentDictionary<ulong, long> UserCounter;
+        private readonly ConcurrentDictionary<ulong, DateTime> _serverReset = new ConcurrentDictionary<ulong, DateTime>();
 
         private Emoji ClaimEmote = new Emoji("🖐");
 
@@ -43,8 +45,8 @@ namespace Sanakan.Services.PocketWaifu
             _waifu = waifu;
             _time = time;
 
-            ServerCounter = new Dictionary<ulong, long>();
-            UserCounter = new Dictionary<ulong, long>();
+            ServerCounter = new ConcurrentDictionary<ulong, long>();
+            UserCounter = new ConcurrentDictionary<ulong, long>();
 #if !DEBUG
             _client.MessageReceived += HandleMessageAsync;
             LoadDumpedData();
@@ -75,11 +77,27 @@ namespace Sanakan.Services.PocketWaifu
 
         public void ForceSpawnCard(ITextChannel spawnChannel, ITextChannel trashChannel, string mention)
         {
+            FireAndForget("Spawn: force", () => SpawnCardAsync(spawnChannel, trashChannel, mention));
+        }
+
+        private void FireAndForget(string what, Func<Task> action)
+        {
             _ = Task.Run(async () =>
             {
-                await SpawnCardAsync(spawnChannel, trashChannel, mention);
+                try
+                {
+                    await action();
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogError($"{what}: {ex}");
+                }
             });
         }
+
+        // Dzienny reset licznika spawnu liczony z czasu, bez tworzenia zadania na kazda wiadomosc
+        public static bool ShouldResetServerCounter(DateTime? nextReset, DateTime now)
+            => nextReset == null || now >= nextReset;
 
         private void LoadDumpedData()
         {
@@ -91,7 +109,7 @@ namespace Sanakan.Services.PocketWaifu
                     var oldData = file.Load<Dictionary<ulong, long>>();
                     if (oldData != null && oldData?.Count > 0)
                     {
-                        UserCounter = oldData;
+                        UserCounter = new ConcurrentDictionary<ulong, long>(oldData);
                     }
                     file.Delete();
                 }
@@ -106,19 +124,15 @@ namespace Sanakan.Services.PocketWaifu
 
         private void HandleGuildAsync(ITextChannel spawnChannel, ITextChannel trashChannel, long daily, string mention, bool noExp)
         {
-            if (!ServerCounter.Any(x => x.Key == spawnChannel.GuildId))
-            {
-                ServerCounter.Add(spawnChannel.GuildId, 0);
-                return;
-            }
+            var now = _time.Now();
 
-            if (ServerCounter[spawnChannel.GuildId] == 0)
+            if (!ServerCounter.ContainsKey(spawnChannel.GuildId))
+                ServerCounter.TryAdd(spawnChannel.GuildId, 0);
+
+            if (ShouldResetServerCounter(_serverReset.TryGetValue(spawnChannel.GuildId, out var next) ? next : (DateTime?)null, now))
             {
-                _ = Task.Run(async () =>
-                {
-                    await Task.Delay(TimeSpan.FromDays(1));
-                    ServerCounter[spawnChannel.GuildId] = 0;
-                });
+                _serverReset[spawnChannel.GuildId] = now.AddDays(1);
+                ServerCounter[spawnChannel.GuildId] = 0;
             }
 
             var chance = noExp ? 0.3d : 1.5d;
@@ -126,11 +140,8 @@ namespace Sanakan.Services.PocketWaifu
             if (!_config.Get().SafariEnabled) return;
             if (!Fun.TakeATry(chance)) return;
 
-            ServerCounter[spawnChannel.GuildId] += 1;
-            _ = Task.Run(async () =>
-            {
-                await SpawnCardAsync(spawnChannel, trashChannel, mention);
-            });
+            ServerCounter.AddOrUpdate(spawnChannel.GuildId, 1, (_, v) => v + 1);
+            FireAndForget("Spawn: karta", () => SpawnCardAsync(spawnChannel, trashChannel, mention));
         }
 
         private void RunSafari(EmbedBuilder embed, IUserMessage msg, Card newCard,
@@ -215,7 +226,7 @@ namespace Sanakan.Services.PocketWaifu
 
                     await db.SaveChangesAsync();
 
-                    QueryCacheManager.ExpireTag(new string[] { $"user-{botUser.Id}", "users" });
+                    QueryCacheManager.ExpireTag(new string[] { CacheTags.User(botUser.Id) });
 
                     if (db.AddActivityFromNewCard(newCard, isOnUserWishlist, _time, botUser, winner.GetUserNickInGuild()))
                     {
@@ -280,17 +291,19 @@ namespace Sanakan.Services.PocketWaifu
         private void HandleUser(SocketUserMessage message)
         {
             var author = message.Author;
-            if (!UserCounter.Any(x => x.Key == author.Id))
+
+            var added = GetMessageRealLenght(message);
+            if (!UserCounter.ContainsKey(author.Id))
             {
-                UserCounter.Add(author.Id, GetMessageRealLenght(message));
+                UserCounter.TryAdd(author.Id, added);
                 return;
             }
 
             var charNeeded = _config.Get().CharPerPacket;
             if (charNeeded <= 0) charNeeded = 3250;
 
-            UserCounter[author.Id] += GetMessageRealLenght(message);
-            if (UserCounter[author.Id] > charNeeded)
+            var total = UserCounter.AddOrUpdate(author.Id, added, (_, v) => v + added);
+            if (total > charNeeded)
             {
                 UserCounter[author.Id] = 0;
                 SpawnUserPacket(author, message.Channel);
@@ -334,10 +347,7 @@ namespace Sanakan.Services.PocketWaifu
                     });
                     await db.SaveChangesAsync();
 
-                    _ = Task.Run(async () =>
-                    {
-                        await channel.SendMessageAsync("", embed: $"{user.Mention} otrzymał pakiet losowych kart.".ToEmbedMessage(EMType.Bot).Build());
-                    });
+                    FireAndForget("Spawn: pakiet", () => channel.SendMessageAsync("", embed: $"{user.Mention} otrzymał pakiet losowych kart.".ToEmbedMessage(EMType.Bot).Build()));
                 }
             }), user.Id);
 

@@ -179,7 +179,7 @@ namespace Sanakan.Services
 
                         await db.SaveChangesAsync();
 
-                        QueryCacheManager.ExpireTag(new string[] { "users" });
+                        QueryCacheManager.ExpireTag(new string[] { CacheTags.User(user.Id) });
                     }
                 }
                 catch (Exception ex)

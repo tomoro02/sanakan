@@ -17,6 +17,9 @@ namespace Sanakan.Database
     {
         private IConfig _config;
 
+        // Wyłącza unieważnianie cache w CacheActivity dla danego zapisu (np. często zapisywany exp).
+        public bool SuppressCacheInvalidation { get; set; }
+
         public DatabaseContext(IConfig config) : base()
         {
             _config = config;
@@ -73,7 +76,7 @@ namespace Sanakan.Database
             };
             optionsBuilder.UseMySql(_config.Get().ConnectionString,
                 new MySqlServerVersion(new System.Version(8, 0, 43)), opt => opt.EnableRetryOnFailure())
-                .AddInterceptors(DbActivity.Commands, DbActivity.Saves);
+                .AddInterceptors(DbActivity.Commands, DbActivity.Saves, CacheActivity.Interceptor);
         }
 
         protected override void OnModelCreating(ModelBuilder modelBuilder)
@@ -97,6 +100,7 @@ namespace Sanakan.Database
             modelBuilder.Entity<User>(entity =>
             {
                 entity.HasKey(e => e.Id);
+                entity.HasIndex(e => e.Shinden);
             });
 
             modelBuilder.Entity<UserStats>(entity =>
@@ -189,6 +193,8 @@ namespace Sanakan.Database
             modelBuilder.Entity<WishlistObject>(entity =>
             {
                 entity.HasKey(e => e.Id);
+
+                entity.HasIndex(e => new { e.ObjectId, e.Type });
 
                 entity.HasOne(e => e.GameDeck)
                     .WithMany(d => d.Wishes);
@@ -336,6 +342,7 @@ namespace Sanakan.Database
             modelBuilder.Entity<PenaltyInfo>(entity =>
             {
                 entity.HasKey(e => e.Id);
+                entity.HasIndex(e => new { e.User, e.Guild, e.Type });
             });
 
             modelBuilder.Entity<OwnedRole>(entity =>
@@ -383,6 +390,7 @@ namespace Sanakan.Database
             modelBuilder.Entity<UserActivity>(entity =>
             {
                 entity.HasKey(e => e.Id);
+                entity.HasIndex(e => e.ShindenId);
             });
 
             modelBuilder.Entity<UserApiKey>(entity =>

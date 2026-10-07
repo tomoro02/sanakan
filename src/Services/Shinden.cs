@@ -109,7 +109,7 @@ namespace Sanakan.Services
                 if (res.IsSuccessStatusCode())
                 {
                      info = res.Body;
-                    _titleRelationCache.Set(titleId, info, new MemoryCacheEntryOptions()
+                    _titleCache.Set(titleId, info, new MemoryCacheEntryOptions()
                         .SetAbsoluteExpiration(TimeSpan.FromHours(8)));
                 }
             }
@@ -172,8 +172,7 @@ namespace Sanakan.Services
         {
             string temp = "";
             int messageNr = 0;
-            var toSend = new string[10];
-            toSend[0] = $"{title}\n```ini\n";
+            var toSend = new List<string> { $"{title}\n```ini\n" };
             int i = 0;
 
             foreach (var item in list)
@@ -182,14 +181,15 @@ namespace Sanakan.Services
                 if (temp.Length > 1800)
                 {
                     toSend[messageNr] += "\n```";
-                    toSend[++messageNr] += $"```ini\n[{i}] {item}\n";
+                    toSend.Add($"```ini\n[{i}] {item}\n");
+                    messageNr++;
                     temp = "";
                 }
                 else toSend[messageNr] += $"[{i}] {item}\n";
             }
             toSend[messageNr] += "```\nNapisz `koniec`, aby zamknąć menu.";
 
-            return toSend;
+            return toSend.ToArray();
         }
 
         public async Task SendSearchInfoAsync(SocketCommandContext context, string title, QuickSearchType type)

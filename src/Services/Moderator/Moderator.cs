@@ -35,7 +35,7 @@ namespace Sanakan.Services
         IgnoredChannels
     }
 
-    public class Moderator
+    public class Moderator : IDisposable
     {
         private DiscordSocketClient _client;
         private ImageProcessing _img;
@@ -43,6 +43,7 @@ namespace Sanakan.Services
         private ILogger _logger;
         private IConfig _config;
         private Timer _timer;
+        private readonly SemaphoreSlim _penaltySweep = new SemaphoreSlim(1, 1);
 
         public Moderator(ILogger logger, IConfig config, DiscordSocketClient client, ISystemTime time, ImageProcessing img)
         {
@@ -54,6 +55,9 @@ namespace Sanakan.Services
 
             _timer = new Timer(async _ =>
             {
+                if (!_penaltySweep.Wait(0))
+                    return;
+
                 try
                 {
                     using (var db = new Database.DatabaseContext(_config))
@@ -64,6 +68,10 @@ namespace Sanakan.Services
                 catch (Exception ex)
                 {
                     _logger.LogError($"in penalty: {ex}");
+                }
+                finally
+                {
+                    _penaltySweep.Release();
                 }
             },
             null,
@@ -82,13 +90,26 @@ namespace Sanakan.Services
                 if (user != null)
                 {
                     var gconfig = await db.GetCachedGuildFullConfigAsync(guild.Id);
+                    if (gconfig == null)
+                        continue;
+
                     var muteModRole = guild.GetRole(gconfig.ModMuteRole);
                     var muteRole = guild.GetRole(gconfig.MuteRole);
 
                     if ((_time.Now() - penalty.StartDate).TotalHours < penalty.DurationInHours)
                     {
                         var muteMod = penalty.Roles.Any(x => gconfig.ModeratorRoles.Any(z => z.Role == x.Role)) ? muteModRole : null;
-                        _ = Task.Run(async () => { await MuteUserGuildAsync(user, muteRole, penalty.Roles, muteMod); });
+                        _ = Task.Run(async () =>
+                        {
+                            try
+                            {
+                                await MuteUserGuildAsync(user, muteRole, penalty.Roles, muteMod);
+                            }
+                            catch (Exception ex)
+                            {
+                                _logger.LogError($"Moderator: re-mute: {ex}");
+                            }
+                        });
                         continue;
                     }
 
@@ -445,7 +466,7 @@ namespace Sanakan.Services
         {
             string mutedList = "Brak";
 
-            var list = (await db.Penalties.Include(x => x.Roles).FromCacheAsync(new string[] { $"mute" })).Where(x => x.Guild == context.Guild.Id && x.Type == PenaltyType.Mute);
+            var list = (await db.Penalties.Include(x => x.Roles).FromCacheAsync(new string[] { CacheTags.Mute })).Where(x => x.Guild == context.Guild.Id && x.Type == PenaltyType.Mute);
             if (list.Count() > 0)
             {
                 mutedList = "";
@@ -509,7 +530,7 @@ namespace Sanakan.Services
 
             await db.SaveChangesAsync();
 
-            QueryCacheManager.ExpireTag(new string[] { $"mute" });
+            QueryCacheManager.ExpireTag(new string[] { CacheTags.Mute });
         }
 
         private async Task MuteUserGuildAsync(SocketGuildUser user, SocketRole muteRole, IEnumerable<OwnedRole> roles, SocketRole modMuteRole = null)
@@ -591,7 +612,7 @@ namespace Sanakan.Services
 
             await db.SaveChangesAsync();
 
-            QueryCacheManager.ExpireTag(new string[] { $"mute" });
+            QueryCacheManager.ExpireTag(new string[] { CacheTags.Mute });
 
             await user.Guild.AddBanAsync(user, 0, exInfo.Info.Reason);
         }
@@ -685,9 +706,15 @@ namespace Sanakan.Services
 
             await db.SaveChangesAsync();
 
-            QueryCacheManager.ExpireTag(new string[] { $"mute" });
+            QueryCacheManager.ExpireTag(new string[] { CacheTags.Mute });
 
             return exInfo;
+        }
+
+        public void Dispose()
+        {
+            _timer?.Dispose();
+            _penaltySweep.Dispose();
         }
     }
 }

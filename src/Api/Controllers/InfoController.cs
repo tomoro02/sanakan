@@ -20,19 +20,21 @@ namespace Sanakan.Api.Controllers
     {
         private readonly Helper _helper;
         private readonly IConfig _config;
+        private readonly Shinden.Logger.ILogger _logger;
 
-        public InfoController(Helper helper, IConfig config)
+        public InfoController(Helper helper, IConfig config, Shinden.Logger.ILogger logger)
         {
             _helper = helper;
             _config = config;
+            _logger = logger;
         }
 
         /// <summary>
         /// Pobiera publiczną listę poleceń bota
         /// </summary>
         /// <response code="500">Internal Server Error</response>
-        [HttpGet("commands")]
-        public async Task<ActionResult<Commands>> GetCommansInfoAsync()
+        [HttpGet("commands"), AllowAnonymous]
+        public ActionResult<Commands> GetCommansInfoAsync()
         {
             try
             {
@@ -44,7 +46,8 @@ namespace Sanakan.Api.Controllers
             }
             catch(Exception ex)
             {
-                return ex.Message.ToResponse(500);
+                _logger?.LogError($"Info commands: {ex}");
+                return "Internal Server Error".ToResponse(500);
             }
         }
 
@@ -53,7 +56,7 @@ namespace Sanakan.Api.Controllers
         /// </summary>
         /// <response code="500">Internal Server Error</response>
         [HttpGet("commands/private"), Authorize(Policy = "Info")]
-        public async Task<ActionResult<Commands>> GetPrivateCommandsInfoAsync()
+        public ActionResult<Commands> GetPrivateCommandsInfoAsync()
         {
             try
             {
@@ -65,7 +68,8 @@ namespace Sanakan.Api.Controllers
             }
             catch(Exception ex)
             {
-                return ex.Message.ToResponse(500);
+                _logger?.LogError($"Info commands: {ex}");
+                return "Internal Server Error".ToResponse(500);
             }
         }
 

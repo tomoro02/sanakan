@@ -70,9 +70,12 @@ namespace Sanakan.Api.Controllers
         /// </summary>
         /// <param name="name">nazwa użytkownika</param>
         /// <returns>id użytkownika</returns>
-        [HttpPost("find")]
+        [HttpPost("find"), AllowAnonymous]
         public async Task<ActionResult<IEnumerable<Shinden.Models.IUserSearch>>> GetUserIdByNameAsync([FromBody, Required]string name)
         {
+            if (string.IsNullOrWhiteSpace(name) || name.Length > 256)
+                return "Invalid name!".ToResponse(400);
+
             var res = await _shClient.Search.UserAsync(name);
             if (!res.IsSuccessStatusCode())
             {
@@ -86,7 +89,7 @@ namespace Sanakan.Api.Controllers
         /// </summary>
         /// <param name="id">id użytkownika shindena</param>
         /// <returns>nazwa użytkownika</returns>
-        [HttpGet("shinden/{id}/username")]
+        [HttpGet("shinden/{id}/username"), AllowAnonymous]
         public async Task<ActionResult<string>> GetShindenUsernameByShindenId(ulong id)
         {
             if (_nameCache.TryGetValue(id, out string username))
@@ -148,7 +151,7 @@ namespace Sanakan.Api.Controllers
         {
             using (var db = new Database.DatabaseContext(_config))
             {
-                var user = db.Users.AsQueryable().AsSplitQuery().Where(x => x.Shinden == id).Include(x => x.GameDeck).AsNoTracking().FirstOrDefault();
+                var user = await db.Users.AsQueryable().AsSplitQuery().Where(x => x.Shinden == id).Include(x => x.GameDeck).AsNoTracking().FirstOrDefaultAsync();
                 if (user == null)
                 {
                     return "User not found!".ToResponse(404);
@@ -360,7 +363,7 @@ namespace Sanakan.Api.Controllers
 
                         await dbs.SaveChangesAsync();
 
-                        QueryCacheManager.ExpireTag(new string[] { $"user-{user.Id}", "users" });
+                        QueryCacheManager.ExpireTag(new string[] { CacheTags.User(user.Id) });
                     }
                 }), id.DiscordUserId, Priority.High);
 
@@ -420,7 +423,7 @@ namespace Sanakan.Api.Controllers
 
                         await dbc.SaveChangesAsync();
 
-                        QueryCacheManager.ExpireTag(new string[] { $"user-{user.Id}", "users" });
+                        QueryCacheManager.ExpireTag(new string[] { CacheTags.User(user.Id) });
                     }
                 }), id, Priority.High);
 
@@ -473,7 +476,7 @@ namespace Sanakan.Api.Controllers
 
                         await dbs.SaveChangesAsync();
 
-                        QueryCacheManager.ExpireTag(new string[] { $"user-{user.Id}", "users" });
+                        QueryCacheManager.ExpireTag(new string[] { CacheTags.User(user.Id) });
                     }
                 }), user.Id, Priority.High);
 

@@ -1038,7 +1038,7 @@ namespace Sanakan.Services.PocketWaifu
 
                 await db.SaveChangesAsync();
 
-                QueryCacheManager.ExpireTag(new string[] { $"user-{bUser.Id}", "users" });
+                QueryCacheManager.ExpireTag(new string[] { CacheTags.User(bUser.Id) });
 
                 return $"{discordUser.Mention} zakupił: _{thisItem.Item.Name}{boosterPackTitleName}{count}_.".ToEmbedMessage(EMType.Success).Build();
             }
@@ -1116,8 +1116,11 @@ namespace Sanakan.Services.PocketWaifu
             => Fun.GetRandomValue(rarity.GetDefenceMin(), rarity.GetDefenceMax() + 1);
 
         static public int RandomizeHealth(Card card)
-            => Fun.GetRandomValue(Math.Min(card.Rarity.GetHealthMin(), card.GetHealthMax() + 1),
-                Math.Max(card.Rarity.GetHealthMin(), card.GetHealthMax() + 1));
+        {
+            int minHp = card.Rarity.GetHealthMin();
+            int maxHp = Math.Max(minHp, card.GetHealthMax());
+            return Fun.GetRandomValue(minHp, maxHp + 1);
+        }
 
         static public Dere RandomizeDere() => Fun.GetOneRandomFrom(_dereToRandomize);
 
@@ -1711,6 +1714,13 @@ namespace Sanakan.Services.PocketWaifu
                 else
                 {
                     var chart = await GetRandomCharacterAsync(poolType);
+                    if (chart.CharInfo == null)
+                    {
+                        if (++errorCnt > 2)
+                            break;
+                        continue;
+                    }
+
                     var newCard = GenerateNewCard(user, chart.CharInfo, pack.RarityExcludedFromPack.Select(x => x.Rarity).ToList());
                     if (pack.MinRarity != Rarity.E && i == pack.CardCnt - 1)
                         newCard = GenerateNewCard(user, chart.CharInfo, pack.MinRarity);

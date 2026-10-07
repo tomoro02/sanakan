@@ -75,6 +75,12 @@ namespace Sanakan.Modules
             using (var db = new Database.DatabaseContext(Config))
             {
                 var botuser = await db.GetCachedFullUserAsync(Context.User.Id);
+                if (botuser == null)
+                {
+                    await SafeReplyAsync("", embed: $"{Context.User.Mention} nie odnaleziono profilu.".ToEmbedMessage(EMType.Error).Build());
+                    return;
+                }
+
                 var rsubs = botuser.TimeStatuses.Where(x => x.Type.IsSubType());
 
                 string subs = "brak";
@@ -276,25 +282,6 @@ namespace Sanakan.Modules
 
                 var url = Api.Models.CardFinalView.GetProfileUrl(dataUser.Id);
                 var profileUri = $"{Dir.FakeCardsAsProfiles}/{dataUser.Id}.webp";
-                if (File.Exists(profileUri))
-                {
-                    var file = new FileInfo(profileUri);
-                    var mb = file.Length / 1024 / 1024;
-                    var dateToCheck = _time.Now().AddDays(1);
-                    if (file.CreationTime > dateToCheck && mb > 3)
-                    {
-                        if (mb > 9)
-                        {
-                            await Context.Channel.SendMessageAsync(url);
-                        }
-                        else
-                        {
-                            await Context.Channel.SendFileAsync(profileUri);
-                        }
-                        return;
-                    }
-                }
-
                 dataUser.GameDeck.Cards = (await db.GetCachedUserGameDeckAsync(searchId)).Cards;
                 using (var image = await _profile.GetProfileImageAsync(usr, dataUser, rankingPosition))
                 {
@@ -355,7 +342,7 @@ namespace Sanakan.Modules
                     {
                         await db.SaveChangesAsync();
 
-                        QueryCacheManager.ExpireTag(new string[] { $"user-{botuser.Id}", "users" });
+                        QueryCacheManager.ExpireTag(new string[] { CacheTags.User(botuser.Id) });
 
                         await SafeReplyAsync("", embed: $"**Odebrane nagrody:**\n\n{string.Join("\n", rewards)}".ToEmbedMessage(EMType.Success).WithUser(Context.User).Build());
                         return;
@@ -534,7 +521,7 @@ namespace Sanakan.Modules
 
                 await db.SaveChangesAsync();
 
-                QueryCacheManager.ExpireTag(new string[] { $"user-{botuser.Id}", "users" });
+                QueryCacheManager.ExpireTag(new string[] { CacheTags.User(botuser.Id) });
 
                 await SafeReplyAsync("", embed: $"{Context.User.Mention} {config.What()}".ToEmbedMessage(EMType.Success).Build());
             }
@@ -582,7 +569,7 @@ namespace Sanakan.Modules
 
                 await db.SaveChangesAsync();
 
-                QueryCacheManager.ExpireTag(new string[] { $"user-{botuser.Id}", "users" });
+                QueryCacheManager.ExpireTag(new string[] { CacheTags.User(botuser.Id) });
 
                 await SafeReplyAsync("", embed: $"{user.Mention} wykupił miesiąc globalnych emotek!".ToEmbedMessage(EMType.Success).Build());
             }
@@ -665,7 +652,7 @@ namespace Sanakan.Modules
 
                 await db.SaveChangesAsync();
 
-                QueryCacheManager.ExpireTag(new string[] { $"user-{botuser.Id}", "users" });
+                QueryCacheManager.ExpireTag(new string[] { CacheTags.User(botuser.Id) });
 
                 await user.AddRoleAsync(selectedRole);
             }
@@ -750,7 +737,7 @@ namespace Sanakan.Modules
 
                 await db.SaveChangesAsync();
 
-                QueryCacheManager.ExpireTag(new string[] { $"user-{botuser.Id}", "users" });
+                QueryCacheManager.ExpireTag(new string[] { CacheTags.User(botuser.Id) });
 
                 await SafeReplyAsync("", embed: $"{user.Mention} wykupił kolor!".ToEmbedMessage(EMType.Success).Build());
             }

@@ -9,6 +9,7 @@ using Discord;
 using Discord.Commands;
 using Discord.WebSocket;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Caching.Memory;
 using Sanakan.Config;
 using Sanakan.Database.Models;
 using Sanakan.Extensions;
@@ -81,7 +82,7 @@ namespace Sanakan.Modules
             using (var db = new Database.DatabaseContext(Config))
             {
                 var user = await db.GetCachedFullUserAsync(Context.User.Id);
-                if (user?.GameDeck?.Cards?.Count() < 1)
+                if (user == null || user.GameDeck == null || user.GameDeck.Cards.IsNullOrEmpty())
                 {
                     await SafeReplyAsync("", embed: $"{Context.User.Mention} nie masz żadnych kart.".ToEmbedMessage(EMType.Error).Build());
                     return;
@@ -231,6 +232,12 @@ namespace Sanakan.Modules
             using (var db = new Database.DatabaseContext(Config))
             {
                 var deck = db.GameDecks.Include(x => x.Figures).FirstOrDefault(x => x.Id == Context.User.Id);
+                if (deck == null)
+                {
+                    await SafeReplyAsync("", embed: $"{Context.User.Mention} nie odnaleziono profilu.".ToEmbedMessage(EMType.Error).Build());
+                    return;
+                }
+
                 if (id > 0)
                 {
                     var oldFig = deck.Figures.FirstOrDefault(x => x.IsFocus);
@@ -292,6 +299,12 @@ namespace Sanakan.Modules
             using (var db = new Database.DatabaseContext(Config))
             {
                 var deck = db.GameDecks.Include(x => x.Figures).Where(x => x.Id == Context.User.Id).FirstOrDefault();
+                if (deck == null)
+                {
+                    await SafeReplyAsync("", embed: $"{Context.User.Mention} nie odnaleziono profilu.".ToEmbedMessage(EMType.Error).Build());
+                    return;
+                }
+
                 var fig = deck.Figures.FirstOrDefault(x => x.IsFocus);
                 if (fig == null)
                 {
@@ -515,7 +528,7 @@ namespace Sanakan.Modules
 
                 await db.SaveChangesAsync();
 
-                QueryCacheManager.ExpireTag(new string[] { $"user-{bUser.Id}", "users" });
+                QueryCacheManager.ExpireTag(new string[] { CacheTags.User(bUser.Id) });
             }
         }
 
@@ -540,7 +553,7 @@ namespace Sanakan.Modules
 
                 await SafeReplyAsync("", embed: $"{Context.User.Mention} twoja pula postaci została rozszerzona.".ToEmbedMessage(EMType.Success).Build());
 
-                QueryCacheManager.ExpireTag(new string[] { $"user-{bUser.Id}", "users" });
+                QueryCacheManager.ExpireTag(new string[] { CacheTags.User(bUser.Id) });
             }
         }
 
@@ -695,7 +708,7 @@ namespace Sanakan.Modules
                 }
 
                 await db.SaveChangesAsync();
-                QueryCacheManager.ExpireTag(new string[] { $"user-{bUser.Id}", "users" });
+                QueryCacheManager.ExpireTag(new string[] { CacheTags.User(bUser.Id) });
 
                 string openString = "";
                 string packString = $"{count} pakietów";
@@ -797,7 +810,7 @@ namespace Sanakan.Modules
                 await db.SaveChangesAsync();
                 _waifu.DeleteCardImageIfExist(card);
 
-                QueryCacheManager.ExpireTag(new string[] { $"user-{bUser.Id}", "users" });
+                QueryCacheManager.ExpireTag(new string[] { CacheTags.User(bUser.Id) });
 
                 await SafeReplyAsync("", embed: $"{Context.User.Mention} zrestartował kartę do: {card.GetString(false, false, true)}.".ToEmbedMessage(EMType.Success).Build());
             }
@@ -835,7 +848,7 @@ namespace Sanakan.Modules
 
                 _waifu.DeleteCardImageIfExist(card);
 
-                QueryCacheManager.ExpireTag(new string[] { $"user-{bUser.Id}", "users" });
+                QueryCacheManager.ExpireTag(new string[] { CacheTags.User(bUser.Id) });
 
                 try
                 {
@@ -921,7 +934,7 @@ namespace Sanakan.Modules
                 if (card.Quality != Quality.Broken)
                 {
                     var cardOverflowPower = (int)card.Quality + card.BorderOverflow;
-                    if (card.Quality == Quality.Omega || cardOverflowPower >= (int)Quality.Omega)
+                    if (card.Quality == Quality.Omega || card.Quality.Fake(card.BorderOverflow) == Quality.Omega)
                     {
                         await SafeReplyAsync("", embed: $"{Context.User.Mention} tej karty nie można już ulepszyć.".ToEmbedMessage(EMType.Error).Build());
                         return;
@@ -997,10 +1010,6 @@ namespace Sanakan.Modules
                     }
                     else
                     {
-                        var cq = card.BorderOverflow > 0
-                            ? card.Quality.Fake(card.BorderOverflow)
-                            : card.Quality;
-
                         card.Quality = card.Quality.Fake(card.BorderOverflow).Next();
                         card.BorderOverflow = 0;
                         card.BorderVariant = 0;
@@ -1041,7 +1050,7 @@ namespace Sanakan.Modules
                 await db.SaveChangesAsync();
                 _waifu.DeleteCardImageIfExist(card);
 
-                QueryCacheManager.ExpireTag(new string[] { $"user-{bUser.Id}", "users" });
+                QueryCacheManager.ExpireTag(new string[] { CacheTags.User(bUser.Id) });
 
                 await SafeReplyAsync("", embed: $"{Context.User.Mention} ulepszył kartę do: {card.GetString(false, false, true)}.".ToEmbedMessage(EMType.Success).Build());
             }
@@ -1066,7 +1075,7 @@ namespace Sanakan.Modules
 
                 await db.SaveChangesAsync();
 
-                QueryCacheManager.ExpireTag(new string[] { $"user-{bUser.Id}", "users" });
+                QueryCacheManager.ExpireTag(new string[] { CacheTags.User(bUser.Id) });
 
                 await SafeReplyAsync("", embed: $"{Context.User.Mention} {res.Message}".ToEmbedMessage(EMType.Success).Build());
             }
@@ -1091,7 +1100,7 @@ namespace Sanakan.Modules
 
                 await db.SaveChangesAsync();
 
-                QueryCacheManager.ExpireTag(new string[] { $"user-{bUser.Id}", "users" });
+                QueryCacheManager.ExpireTag(new string[] { CacheTags.User(bUser.Id) });
 
                 await SafeReplyAsync("", embed: $"{Context.User.Mention} {res.Message}".ToEmbedMessage(EMType.Success).Build());
             }
@@ -1170,7 +1179,7 @@ namespace Sanakan.Modules
 
                 await db.SaveChangesAsync();
 
-                QueryCacheManager.ExpireTag(new string[] { $"user-{bUser.Id}", "users" });
+                QueryCacheManager.ExpireTag(new string[] { CacheTags.User(bUser.Id) });
 
                 await SafeReplyAsync("", embed: $"{Context.User.Mention} przeniesiono doświadczenie na kartę lub figurkę.".ToEmbedMessage(EMType.Success).Build());
             }
@@ -1264,7 +1273,7 @@ namespace Sanakan.Modules
 
                 await db.SaveChangesAsync();
 
-                QueryCacheManager.ExpireTag(new string[] { $"user-{bUser.Id}", "users" });
+                QueryCacheManager.ExpireTag(new string[] { CacheTags.User(bUser.Id) });
 
                 string action = bUser.GameDeck.ExpContainer.Level == ExpContainerLevel.Level1 ? "otrzymałeś" : "ulepszyłeś";
                 await SafeReplyAsync("", embed: $"{Context.User.Mention} {action} skrzynię doświadczenia.".ToEmbedMessage(EMType.Success).Build());
@@ -1382,7 +1391,7 @@ namespace Sanakan.Modules
                     await db.SaveChangesAsync();
                 }
 
-                QueryCacheManager.ExpireTag(new string[] { $"user-{botuser.Id}", "users" });
+                QueryCacheManager.ExpireTag(new string[] { CacheTags.User(botuser.Id) });
 
                 await SafeReplyAsync("", embed: $"{Context.User.Mention} otrzymałeś {wishStr}{card.GetString(false, false, true)}".ToEmbedMessage(EMType.Success).Build());
             }
@@ -1510,7 +1519,7 @@ namespace Sanakan.Modules
 
                 await db.SaveChangesAsync();
 
-                QueryCacheManager.ExpireTag(new string[] { $"user-{botuser.Id}", "users" });
+                QueryCacheManager.ExpireTag(new string[] { CacheTags.User(botuser.Id) });
 
                 await SafeReplyAsync("", embed: $"{Context.User.Mention} udało Ci się zdobyć:\n\n{reward}".ToEmbedMessage(EMType.Success).Build());
             }
@@ -1618,7 +1627,7 @@ namespace Sanakan.Modules
 
                 await db.SaveChangesAsync();
 
-                QueryCacheManager.ExpireTag(new string[] { $"user-{botuser.Id}", "users" });
+                QueryCacheManager.ExpireTag(new string[] { CacheTags.User(botuser.Id) });
 
                 await SafeReplyAsync("", embed: $"{Context.User.Mention} udało Ci się zdobyć:\n\n{reward}".ToEmbedMessage(EMType.Success).Build());
             }
@@ -1690,7 +1699,7 @@ namespace Sanakan.Modules
 
                 await db.SaveChangesAsync();
 
-                QueryCacheManager.ExpireTag(new string[] { $"user-{bUser.Id}", "users" });
+                QueryCacheManager.ExpireTag(new string[] { CacheTags.User(bUser.Id) });
 
                 if (cardsToSac.Count > broken.Count)
                 {
@@ -1777,7 +1786,7 @@ namespace Sanakan.Modules
 
                 await db.SaveChangesAsync();
 
-                QueryCacheManager.ExpireTag(new string[] { $"user-{bUser.Id}", "users" });
+                QueryCacheManager.ExpireTag(new string[] { CacheTags.User(bUser.Id) });
 
                 await SafeReplyAsync("", embed: $"{user.Mention} wyciągnął {cntIn} kart z klatki.".ToEmbedMessage(EMType.Success).Build());
             }
@@ -1809,7 +1818,7 @@ namespace Sanakan.Modules
 
                 await db.SaveChangesAsync();
 
-                QueryCacheManager.ExpireTag(new string[] { $"user-{bUser.Id}", "users" });
+                QueryCacheManager.ExpireTag(new string[] { CacheTags.User(bUser.Id) });
 
                 await SafeReplyAsync("", embed: $"{Context.User.Mention} usunął pozycję z listy życzeń.".ToEmbedMessage(EMType.Success).Build());
             }
@@ -1912,7 +1921,7 @@ namespace Sanakan.Modules
 
                     await db.SaveChangesAsync();
 
-                    QueryCacheManager.ExpireTag(new string[] { $"user-{bUser.Id}", "users" });
+                    QueryCacheManager.ExpireTag(new string[] { CacheTags.User(bUser.Id) });
 
                     await SafeReplyAsync("", embed: $"{Context.User.Mention} dodał do listy życzeń: {response}".ToEmbedMessage(EMType.Success).Build());
                 }
@@ -1991,7 +2000,7 @@ namespace Sanakan.Modules
 
                 await db.SaveChangesAsync();
 
-                QueryCacheManager.ExpireTag(new string[] { $"user-{bUser.Id}", "users" });
+                QueryCacheManager.ExpireTag(new string[] { CacheTags.User(bUser.Id) });
 
                 await SafeReplyAsync("", embed: $"{Context.User.Mention} dodał do listy życzeń: {response}".ToEmbedMessage(EMType.Success).Build());
             }
@@ -2010,7 +2019,7 @@ namespace Sanakan.Modules
 
                 await db.SaveChangesAsync();
 
-                QueryCacheManager.ExpireTag(new string[] { $"user-{bUser.Id}", "users" });
+                QueryCacheManager.ExpireTag(new string[] { CacheTags.User(bUser.Id) });
 
                 string response = (!view) ? $"ukrył" : $"udostępnił";
                 await SafeReplyAsync("", embed: $"{Context.User.Mention} {response} swoją listę życzeń!".ToEmbedMessage(EMType.Success).Build());
@@ -2293,7 +2302,7 @@ namespace Sanakan.Modules
 
                 await db.SaveChangesAsync();
 
-                QueryCacheManager.ExpireTag(new string[] { $"user-{bUser.Id}", "users" });
+                QueryCacheManager.ExpireTag(new string[] { CacheTags.User(bUser.Id) });
 
                 await SafeReplyAsync("", embed: $"{Context.User.Mention} wyzwolił kartę {thisCard.GetString(false, false, true)}".ToEmbedMessage(EMType.Success).Build());
             }
@@ -2332,7 +2341,7 @@ namespace Sanakan.Modules
 
                 await db.SaveChangesAsync();
 
-                QueryCacheManager.ExpireTag(new string[] { $"user-{bUser.Id}", "users" });
+                QueryCacheManager.ExpireTag(new string[] { CacheTags.User(bUser.Id) });
 
                 await SafeReplyAsync("", embed: $"{Context.User.Mention} powiększył swój limit kart do {bUser.GameDeck.MaxNumberOfCards}.".ToEmbedMessage(EMType.Success).Build());
             }
@@ -2506,7 +2515,7 @@ namespace Sanakan.Modules
 
                 await db.SaveChangesAsync();
 
-                QueryCacheManager.ExpireTag(new string[] { $"user-{bUser.Id}", "users" });
+                QueryCacheManager.ExpireTag(new string[] { CacheTags.User(bUser.Id) });
 
                 var actionName = action switch
                 {
@@ -2538,7 +2547,7 @@ namespace Sanakan.Modules
 
                 await db.SaveChangesAsync();
 
-                QueryCacheManager.ExpireTag(new string[] { $"user-{bUser.Id}", "users" });
+                QueryCacheManager.ExpireTag(new string[] { CacheTags.User(bUser.Id) });
 
                 await SafeReplyAsync("", embed: $"{Context.User.Mention} zapisano nowe sortowanie.".ToEmbedMessage(EMType.Success).Build());
             }
@@ -2577,7 +2586,7 @@ namespace Sanakan.Modules
 
                 await db.SaveChangesAsync();
 
-                QueryCacheManager.ExpireTag(new string[] { $"user-{bUser.Id}", "users" });
+                QueryCacheManager.ExpireTag(new string[] { CacheTags.User(bUser.Id) });
 
                 await SafeReplyAsync("", embed: $"{Context.User.Mention} powiększył swój limit kart w galerii do {bUser.GameDeck.CardsInGallery}.".ToEmbedMessage(EMType.Success).Build());
             }
@@ -2589,6 +2598,12 @@ namespace Sanakan.Modules
         [Remarks("25"), RequireWaifuCommandChannel]
         public async Task GoToLotteryAsync([Summary("krotność użycia polecenia")] uint count = 1)
         {
+            if (count < 1)
+            {
+                await SafeReplyAsync("", embed: $"{Context.User.Mention} podaj poprawną krotność.".ToEmbedMessage(EMType.Error).Build());
+                return;
+            }
+
             using (var db = new Database.DatabaseContext(Config))
             {
                 var bUser = await db.GetUserOrCreateAsync(Context.User.Id);
@@ -2626,7 +2641,7 @@ namespace Sanakan.Modules
 
                 await db.SaveChangesAsync();
 
-                QueryCacheManager.ExpireTag(new string[] { $"user-{bUser.Id}", "users" });
+                QueryCacheManager.ExpireTag(new string[] { CacheTags.User(bUser.Id) });
 
                 await SafeReplyAsync("", embed: $"{Context.User.Mention} wygrał na loterii:**{rewardString}**".TrimToLength().ToEmbedMessage(EMType.Success).Build());
             }
@@ -2772,7 +2787,7 @@ namespace Sanakan.Modules
                 bUser.MarkActivity(_time.Now());
 
                 await db.SaveChangesAsync();
-                QueryCacheManager.ExpireTag(new string[] { $"user-{bUser.Id}", "users" });
+                QueryCacheManager.ExpireTag(new string[] { CacheTags.User(bUser.Id) });
 
                 string openString = "";
                 bool saveAgain = false;
@@ -2845,7 +2860,7 @@ namespace Sanakan.Modules
 
                 await db.SaveChangesAsync();
 
-                QueryCacheManager.ExpireTag(new string[] { $"user-{bUser.Id}", "users" });
+                QueryCacheManager.ExpireTag(new string[] { CacheTags.User(bUser.Id) });
             }
         }
 
@@ -2950,7 +2965,7 @@ namespace Sanakan.Modules
                 buser.GameDeck.Tags.Add(new Tag { Name = tag });
                 await db.SaveChangesAsync();
 
-                QueryCacheManager.ExpireTag(new string[] { $"user-{Context.User.Id}", "users" });
+                QueryCacheManager.ExpireTag(new string[] { CacheTags.User(Context.User.Id) });
 
                 await SafeReplyAsync("", embed: $"{Context.User.Mention} utworzono nowe oznaczenie: `{tag}`".ToEmbedMessage(EMType.Success).Build());
             }
@@ -3009,7 +3024,7 @@ namespace Sanakan.Modules
 
                 await db.SaveChangesAsync();
 
-                QueryCacheManager.ExpireTag(new string[] { $"user-{Context.User.Id}", "users" });
+                QueryCacheManager.ExpireTag(new string[] { CacheTags.User(Context.User.Id) });
 
                 await SafeReplyAsync("", embed: $"{Context.User.Mention} {response}".ToEmbedMessage(EMType.Success).Build());
             }
@@ -3050,7 +3065,7 @@ namespace Sanakan.Modules
 
                 await db.SaveChangesAsync();
 
-                QueryCacheManager.ExpireTag(new string[] { $"user-{Context.User.Id}", "users" });
+                QueryCacheManager.ExpireTag(new string[] { CacheTags.User(Context.User.Id) });
 
                 await SafeReplyAsync("", embed: $"{Context.User.Mention} oznaczono {cardsSelected.Count} kart.".ToEmbedMessage(EMType.Success).Build());
             }
@@ -3078,7 +3093,7 @@ namespace Sanakan.Modules
 
                 await db.SaveChangesAsync();
 
-                QueryCacheManager.ExpireTag(new string[] { $"user-{Context.User.Id}", "users" });
+                QueryCacheManager.ExpireTag(new string[] { CacheTags.User(Context.User.Id) });
 
                 await SafeReplyAsync("", embed: $"{Context.User.Mention} usunięto oznaczenie z {cardsSelected.Count} kart.".ToEmbedMessage(EMType.Success).Build());
             }
@@ -3117,7 +3132,7 @@ namespace Sanakan.Modules
 
                 await db.SaveChangesAsync();
 
-                QueryCacheManager.ExpireTag(new string[] { $"user-{Context.User.Id}", "users" });
+                QueryCacheManager.ExpireTag(new string[] { CacheTags.User(Context.User.Id) });
 
                 await SafeReplyAsync("", embed: $"{Context.User.Mention} oznaczono {untaggedCards.Count} kart.".ToEmbedMessage(EMType.Success).Build());
             }
@@ -3177,7 +3192,7 @@ namespace Sanakan.Modules
 
                 await db.SaveChangesAsync();
 
-                QueryCacheManager.ExpireTag(new string[] { $"user-{Context.User.Id}", "users" });
+                QueryCacheManager.ExpireTag(new string[] { CacheTags.User(Context.User.Id) });
 
                 string thing = removeTag ? "skasowane" : "zmienione";
                 await SafeReplyAsync("", embed: $"{Context.User.Mention} {thing} zostało oznaczenie na {cardsSelected.Count} kartach.".ToEmbedMessage(EMType.Success).Build());
@@ -3213,7 +3228,7 @@ namespace Sanakan.Modules
 
                 await db.SaveChangesAsync();
 
-                QueryCacheManager.ExpireTag(new string[] { $"user-{Context.User.Id}", "users" });
+                QueryCacheManager.ExpireTag(new string[] { CacheTags.User(Context.User.Id) });
 
                 await SafeReplyAsync("", embed: $"{Context.User.Mention} skasowane zostało oznaczenie `{tag}` z {cardsSelected.Count} kart.".ToEmbedMessage(EMType.Success).Build());
             }
@@ -3233,7 +3248,7 @@ namespace Sanakan.Modules
 
                 await db.SaveChangesAsync();
 
-                QueryCacheManager.ExpireTag(new string[] { $"user-{bUser.Id}", "users" });
+                QueryCacheManager.ExpireTag(new string[] { CacheTags.User(bUser.Id) });
 
                 await SafeReplyAsync("", embed: $"{Context.User.Mention} ustawił nowe zasady wymiany.".ToEmbedMessage(EMType.Success).Build());
             }
@@ -3299,7 +3314,7 @@ namespace Sanakan.Modules
 
                 await db.SaveChangesAsync();
 
-                QueryCacheManager.ExpireTag(new string[] { $"user-{bUser.Id}", "users" });
+                QueryCacheManager.ExpireTag(new string[] { CacheTags.User(bUser.Id) });
 
                 var message = thisCard.Active ? "aktywował: " : "dezaktywował: ";
                 var power = $"**Moc talii**: {bUser.GameDeck.DeckPower:F}";
@@ -3322,7 +3337,7 @@ namespace Sanakan.Modules
 
             using (var db = new Database.DatabaseContext(Config))
             {
-                var cards = await db.Cards.Include(x => x.Tags).Include(x => x.GameDeck).ThenInclude(x => x.User).Where(x => x.Character == id).AsNoTracking().FromCacheAsync(new[] { "users" });
+                var cards = await db.Cards.Include(x => x.Tags).Include(x => x.GameDeck).ThenInclude(x => x.User).Where(x => x.Character == id).AsNoTracking().FromCacheAsync(new MemoryCacheEntryOptions { AbsoluteExpirationRelativeToNow = TimeSpan.FromHours(1) }, CacheTags.Character(id));
 
                 if (onlyScalpels)
                     cards = cards.Where(x => !string.IsNullOrEmpty(x.CustomImage));
@@ -3485,7 +3500,7 @@ namespace Sanakan.Modules
                     }
                 }
 
-                var cards = await db.Cards.AsQueryable().Include(x => x.Tags).Include(x => x.GameDeck).AsSplitQuery().Where(x => characterIds.Contains(x.Character)).AsNoTracking().FromCacheAsync(new[] { "users" });
+                var cards = await db.Cards.AsQueryable().Include(x => x.Tags).Include(x => x.GameDeck).AsSplitQuery().Where(x => characterIds.Contains(x.Character)).AsNoTracking().FromCacheAsync(new MemoryCacheEntryOptions { AbsoluteExpirationRelativeToNow = TimeSpan.FromHours(1) }, characterIds.Where(x => x.HasValue).Select(x => CacheTags.Character(x.Value)).Distinct().ToArray());
                 if (cards.Count() < 1)
                 {
                     await SafeReplyAsync("", embed: $"Nie odnaleziono kart.".ToEmbedMessage(EMType.Error).Build());
@@ -3607,6 +3622,12 @@ namespace Sanakan.Modules
                 var userItems = buser.GetAllItems().ToArray();
                 foreach (var it in items)
                 {
+                    if (it.Item < 1 || it.Item > (uint)userItems.Length)
+                    {
+                        errors.Add($"niepoprawny numer przedmiotu: {it.Item}");
+                        continue;
+                    }
+
                     var thisItem = userItems[it.Item - 1];
                     if (it.Count == 0)
                     {
@@ -3644,7 +3665,7 @@ namespace Sanakan.Modules
 
                 await db.SaveChangesAsync();
 
-                QueryCacheManager.ExpireTag(new string[] { $"user-{buser.Id}" });
+                QueryCacheManager.ExpireTag(new string[] { CacheTags.User(buser.Id) });
 
                 string errorInfo = errors.Count > 0 ? $"\n\n❗ Nie udało się wymienić:\n\n{string.Join("\n", errors)}": "";
                 await SafeReplyAsync("", embed: $"{Context.User.Mention} udało się zyskać **{scrapes}** fragmentów, masz ich w sumie już **{tItem.Count}**.{errorInfo}"
@@ -3728,11 +3749,18 @@ namespace Sanakan.Modules
 
                 await db.SaveChangesAsync();
 
-                QueryCacheManager.ExpireTag(new string[] { $"user-{botUser.Id}", "users" });
+                QueryCacheManager.ExpireTag(new string[] { CacheTags.User(botUser.Id) });
 
                 _ = Task.Run(async () =>
                 {
-                    await SafeReplyAsync("", embed: $"Karta {thisCard.GetString(false, false, true)} wróciła z {oldName.GetName("ej")} wyprawy!\n\n{message}{action}".ToEmbedMessage(EMType.Success).WithUser(Context.User).Build());
+                    try
+                    {
+                        await SafeReplyAsync("", embed: $"Karta {thisCard.GetString(false, false, true)} wróciła z {oldName.GetName("ej")} wyprawy!\n\n{message}{action}".ToEmbedMessage(EMType.Success).WithUser(Context.User).Build());
+                    }
+                    catch (Exception ex)
+                    {
+                        Logger?.LogError($"Expedition return reply: {ex}");
+                    }
                 });
             }
         }
@@ -3813,19 +3841,26 @@ namespace Sanakan.Modules
 
                 await db.SaveChangesAsync();
 
-                QueryCacheManager.ExpireTag(new string[] { $"user-{botUser.Id}", "users" });
+                QueryCacheManager.ExpireTag(new string[] { CacheTags.User(botUser.Id) });
 
                 _ = Task.Run(async () =>
                 {
-                    if (cardsSelected.Count == 1)
+                    try
                     {
-                        var thisCard = cardsSelected.FirstOrDefault();
-                        var max = _expedition.GetMaxPossibleLengthOfExpedition(botUser, thisCard, expedition).ToString("F");
-                        await SafeReplyAsync("", embed: $"{thisCard.GetString(false, false, true)} udała się na {expedition.GetName("ą")} wyprawę!\nZmęczy się za {max} min.".ToEmbedMessage(EMType.Success).WithUser(Context.User).Build());
+                        if (cardsSelected.Count == 1)
+                        {
+                            var thisCard = cardsSelected.FirstOrDefault();
+                            var max = _expedition.GetMaxPossibleLengthOfExpedition(botUser, thisCard, expedition).ToString("F");
+                            await SafeReplyAsync("", embed: $"{thisCard.GetString(false, false, true)} udała się na {expedition.GetName("ą")} wyprawę!\nZmęczy się za {max} min.".ToEmbedMessage(EMType.Success).WithUser(Context.User).Build());
+                        }
+                        else
+                        {
+                            await SafeReplyAsync("", embed: $"Wysłano **{cardsSelected.Count}** kart na {expedition.GetName("ą")} wyprawę!".ToEmbedMessage(EMType.Success).WithUser(Context.User).Build());
+                        }
                     }
-                    else
+                    catch (Exception ex)
                     {
-                        await SafeReplyAsync("", embed: $"Wysłano **{cardsSelected.Count}** kart na {expedition.GetName("ą")} wyprawę!".ToEmbedMessage(EMType.Success).WithUser(Context.User).Build());
+                        Logger?.LogError($"Expedition send reply: {ex}");
                     }
                 });
             }
@@ -4048,8 +4083,15 @@ namespace Sanakan.Modules
 
                 _ = Task.Run(async () =>
                 {
-                    string wStr = fight.Winner == null ? "Remis!" : $"Zwycięża {fight.Winner.User.Mention}!";
-                    await SafeReplyAsync("", embed: $"⚔️ **Pojedynek**:\n{Context.User.Mention} vs. {euser.Mention}\n\n{deathLog.TrimToLength(2000)}\n{wStr}\n{info}".ToEmbedMessage(EMType.Bot).Build());
+                    try
+                    {
+                        string wStr = fight.Winner == null ? "Remis!" : $"Zwycięża {fight.Winner.User.Mention}!";
+                        await SafeReplyAsync("", embed: $"⚔️ **Pojedynek**:\n{Context.User.Mention} vs. {euser.Mention}\n\n{deathLog.TrimToLength(2000)}\n{wStr}\n{info}".ToEmbedMessage(EMType.Bot).Build());
+                    }
+                    catch (Exception ex)
+                    {
+                        Logger?.LogError($"Duel reply: {ex}");
+                    }
                 });
             }
         }
@@ -4163,7 +4205,7 @@ namespace Sanakan.Modules
                 bUser.GameDeck.PremiumWaifu = 0;
                 await db.SaveChangesAsync();
 
-                QueryCacheManager.ExpireTag(new string[] { $"user-{bUser.Id}", "users" });
+                QueryCacheManager.ExpireTag(new string[] { CacheTags.User(bUser.Id) });
 
                 await SafeReplyAsync("", embed: $"{Context.User.Mention} ustawił {thisCard.Name} jako ulubioną postać.".ToEmbedMessage(EMType.Success).Build());
             }
@@ -4302,7 +4344,7 @@ namespace Sanakan.Modules
                 await db.UserActivities.AddAsync(activity.Build());
 
                 await db.SaveChangesAsync();
-                QueryCacheManager.ExpireTag(new string[] { $"user-{bUser.Id}", "users" });
+                QueryCacheManager.ExpireTag(new string[] { CacheTags.User(bUser.Id) });
 
                 await SafeReplyAsync("", embed: $"{Context.User.Mention} nowy charakter to {thisCard.Dere}".ToEmbedMessage(EMType.Success).Build());
             }

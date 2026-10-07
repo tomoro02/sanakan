@@ -30,6 +30,8 @@ namespace Sanakan.Api.Controllers
     {
         private const uint MaxCardsPerRequest = 4000;
         private const uint MaxActivitiesPerRequest = 4000;
+        private const int MaxFilterItems = 1000;
+        private const int MaxSearchTextLength = 100;
 
         private readonly Waifu _waifu;
         private readonly TagHelper _tags;
@@ -105,11 +107,14 @@ namespace Sanakan.Api.Controllers
         /// <param name="count">liczba wpisów (0 lub więcej niż limit oznacza limit - 4000)</param>
         /// <param name="users">id użytkowników shinden</param>
         /// <returns>lista aktywności</returns>
-        [HttpPost("user/activity/{count}")]
+        [HttpPost("user/activity/{count}"), AllowAnonymous]
         public async Task<ActionResult<IEnumerable<UserActivity>>> GetUsersActivitiesAsync(uint count, [FromBody]List<ulong> users)
         {
             if (count == 0 || count > MaxActivitiesPerRequest)
                 count = MaxActivitiesPerRequest;
+
+            if (users != null && users.Count > MaxFilterItems)
+                return "Too many users!".ToResponse(400);
 
             using (var db = new Database.DatabaseContext(_config))
             {
@@ -127,7 +132,7 @@ namespace Sanakan.Api.Controllers
         /// </summary>
         /// <param name="lastId">id aktywności od której zacząć nową listę</param>
         /// <returns>lista aktywności</returns>
-        [HttpGet("user/activity/{lastId}")]
+        [HttpGet("user/activity/{lastId}"), AllowAnonymous]
         public async Task<ActionResult<IEnumerable<UserActivity>>> GetUsersActivitiesFromIdAsync(ulong lastId)
         {
             using (var db = new Database.DatabaseContext(_config))
@@ -143,9 +148,12 @@ namespace Sanakan.Api.Controllers
         /// <param name="count">liczba kart</param>
         /// <param name="filter">filtry listy</param>
         /// <returns>lista kart</returns>
-        [HttpPost("total/cards/{offset}/{count}")]
+        [HttpPost("total/cards/{offset}/{count}"), AllowAnonymous]
         public async Task<ActionResult<FilteredCards>> GetCardsWithOffsetAndFilterAsync(uint offset, uint count, [FromBody]CardsQueryFilter filter)
         {
+            var invalid = ValidateFilter(filter);
+            if (invalid != null) return invalid;
+
             using (var db = new Database.DatabaseContext(_config))
             {
                 var query = db.Cards.AsQueryable().AsSplitQuery().Include(x => x.GameDeck).ThenInclude(x => x.User).Include(x => x.Tags).AsNoTrackingWithIdentityResolution();
@@ -170,9 +178,12 @@ namespace Sanakan.Api.Controllers
         /// <param name="count">liczba kart</param>
         /// <param name="filter">filtry listy</param>
         /// <returns>lista kart</returns>
-        [HttpPost("ultimate/cards/{offset}/{count}")]
+        [HttpPost("ultimate/cards/{offset}/{count}"), AllowAnonymous]
         public async Task<ActionResult<FilteredCards>> GetUltimateCardsWithOffsetAndFilterAsync(uint offset, uint count, [FromBody]CardsQueryFilter filter)
         {
+            var invalid = ValidateFilter(filter);
+            if (invalid != null) return invalid;
+
             using (var db = new Database.DatabaseContext(_config))
             {
                 var query = db.Cards.AsQueryable().AsSplitQuery().Where(x => x.FromFigure).Include(x => x.GameDeck).ThenInclude(x => x.User).Include(x => x.Tags).AsNoTrackingWithIdentityResolution();
@@ -185,7 +196,7 @@ namespace Sanakan.Api.Controllers
                 query = FilterCardsByIds(query, filter);
 
                 var expireTime = new MemoryCacheEntryOptions().SetAbsoluteExpiration(_time.Now().AddHours(4));
-                var cached = await FilterCardsByTags(query, filter).FromCacheAsync(expireTime, $"ultimate-cards");
+                var cached = await FilterCardsByTags(query, filter).FromCacheAsync(expireTime, CacheTags.UltimateCards);
                 var cards = cached.ToList();
                 var page = cards.Skip((int)offset).Take((int)Math.Min(count, MaxCardsPerRequest)).ToList();
 
@@ -200,9 +211,12 @@ namespace Sanakan.Api.Controllers
         /// <param name="count">liczba kart</param>
         /// <param name="filter">filtry listy</param>
         /// <returns>lista kart</returns>
-        [HttpPost("unique/cards/{offset}/{count}")]
+        [HttpPost("unique/cards/{offset}/{count}"), AllowAnonymous]
         public async Task<ActionResult<FilteredCards>> GetUniqueCardsWithOffsetAndFilterAsync(uint offset, uint count, [FromBody]CardsQueryFilter filter)
         {
+            var invalid = ValidateFilter(filter);
+            if (invalid != null) return invalid;
+
             using (var db = new Database.DatabaseContext(_config))
             {
                 var query = db.Cards.AsQueryable().AsSplitQuery().Where(x => x.Unique).Include(x => x.GameDeck).ThenInclude(x => x.User).Include(x => x.Tags).AsNoTrackingWithIdentityResolution();
@@ -215,7 +229,7 @@ namespace Sanakan.Api.Controllers
                 query = FilterCardsByIds(query, filter);
 
                 var expireTime = new MemoryCacheEntryOptions().SetAbsoluteExpiration(_time.Now().AddHours(8));
-                var cached = await FilterCardsByTags(query, filter).FromCacheAsync(expireTime, $"unique-cards");
+                var cached = await FilterCardsByTags(query, filter).FromCacheAsync(expireTime, CacheTags.UniqueCards);
                 var cards = cached.ToList();
                 var page = cards.Skip((int)offset).Take((int)Math.Min(count, MaxCardsPerRequest)).ToList();
 
@@ -232,9 +246,12 @@ namespace Sanakan.Api.Controllers
         /// <param name="filter">filtry listy</param>
         /// <returns>lista kart</returns>
         /// <response code="404">User not found</response>
-        [HttpPost("user/{id}/cards/{offset}/{count}")]
+        [HttpPost("user/{id}/cards/{offset}/{count}"), AllowAnonymous]
         public async Task<ActionResult<FilteredCards>> GetUsersCardsByShindenIdWithOffsetAndFilterAsync(ulong id, uint offset, uint count, [FromBody]CardsQueryFilter filter)
         {
+            var invalid = ValidateFilter(filter);
+            if (invalid != null) return invalid;
+
             using (var db = new Database.DatabaseContext(_config))
             {
                 var user = await db.Users.AsQueryable().Where(x => x.Shinden == id).Include(x => x.GameDeck).AsNoTracking().AsSplitQuery().FirstOrDefaultAsync();
@@ -260,7 +277,7 @@ namespace Sanakan.Api.Controllers
                 query = FilterCardsByTags(query, filter);
 
                 var username = await GetUsernameAsync(user.Shinden);
-                var cards = await query.Skip((int)offset).Take((int)count).ToListAsync();
+                var cards = await query.Skip((int)offset).Take((int)Math.Min(count, MaxCardsPerRequest)).ToListAsync();
 
                 return new FilteredCards{TotalCards = query.Count(), Cards = cards.ToView(username, id, _time)};
             }
@@ -274,7 +291,7 @@ namespace Sanakan.Api.Controllers
         /// <param name="count">liczba kart</param>
         /// <returns>lista kart</returns>
         /// <response code="404">User not found</response>
-        [HttpGet("user/{id}/cards/{offset}/{count}")]
+        [HttpGet("user/{id}/cards/{offset}/{count}"), AllowAnonymous]
         public async Task<ActionResult<IEnumerable<CardFinalView>>> GetUsersCardsByShindenIdWithOffsetAsync(ulong id, uint offset, uint count)
         {
             using (var db = new Database.DatabaseContext(_config))
@@ -291,7 +308,7 @@ namespace Sanakan.Api.Controllers
                     return "User on blacklist".ToResponse(401);
                 }
 
-                var cards = await db.Cards.AsQueryable().AsSplitQuery().Where(x => x.GameDeckId == user.GameDeck.Id).Include(x => x.Tags).Skip((int)offset).Take((int)count).AsNoTrackingWithIdentityResolution().ToListAsync();
+                var cards = await db.Cards.AsQueryable().AsSplitQuery().Where(x => x.GameDeckId == user.GameDeck.Id).Include(x => x.Tags).Skip((int)offset).Take((int)Math.Min(count, MaxCardsPerRequest)).AsNoTrackingWithIdentityResolution().ToListAsync();
                 var username = await GetUsernameAsync(user.Shinden);
                 return cards.ToView(username, 0, _time);
             }
@@ -303,7 +320,7 @@ namespace Sanakan.Api.Controllers
         /// <param name="id">id karty</param>
         /// <returns>karta</returns>
         /// <response code="404">Card not found</response>
-        [HttpGet("card/{id}/view")]
+        [HttpGet("card/{id}/view"), AllowAnonymous]
         public async Task<ActionResult<CardFinalView>> GetCardViewAsync(ulong id)
         {
             using (var db = new Database.DatabaseContext(_config))
@@ -329,7 +346,7 @@ namespace Sanakan.Api.Controllers
         /// <returns>lista życzeń</returns>
         /// <response code="404">User not found</response>
         /// <response code="401">User wishlist is private</response>
-        [HttpGet("user/shinden/{id}/wishlist/raw")]
+        [HttpGet("user/shinden/{id}/wishlist/raw"), AllowAnonymous]
         public async Task<ActionResult<IEnumerable<WishlistObject>>> GetUsersRawWishlistByShindenIdAsync(ulong id)
         {
             using (var db = new Database.DatabaseContext(_config))
@@ -361,7 +378,7 @@ namespace Sanakan.Api.Controllers
         /// <param name="count">jak dużo wpisów</param>
         /// <returns>topka życzeń</returns>
         /// <response code="404">Not found</response>
-        [HttpGet("top/characters/{count}")]
+        [HttpGet("top/characters/{count}"), AllowAnonymous]
         public async Task<ActionResult<IEnumerable<Database.Models.Analytics.WishlistCount>>> GetTopCharactersAsync(int count)
         {
             using (var db = new Database.DatabaseContext(_config))
@@ -381,7 +398,7 @@ namespace Sanakan.Api.Controllers
         /// <param name="id">id użytkownika shindena</param>
         /// <returns>profil</returns>
         /// <response code="404">User not found</response>
-        [HttpGet("user/{id}/profile")]
+        [HttpGet("user/{id}/profile"), AllowAnonymous]
         public async Task<ActionResult<UserSiteProfile>> GetUserWaifuProfileAsync(ulong id)
         {
             using (var db = new Database.DatabaseContext(_config))
@@ -390,7 +407,7 @@ namespace Sanakan.Api.Controllers
                 var expireTime = new MemoryCacheEntryOptions().SetAbsoluteExpiration(_time.Now().AddMinutes(15));
                 var cached = await db.Users.AsQueryable().AsSplitQuery().Where(x => x.Shinden == id).Include(x => x.GameDeck).ThenInclude(x => x.Tags).Include(x => x.GameDeck)
                     .ThenInclude(x => x.PvPStats).Include(x => x.GameDeck).ThenInclude(x => x.Cards).ThenInclude(x => x.Tags).Include(x => x.Stats).AsNoTracking()
-                    .FromCacheAsync(expireTime, $"user-profile-{id}");
+                    .FromCacheAsync(expireTime, CacheTags.UserProfile(id));
                 var user = cached.FirstOrDefault();
 
                 if (user == null)
@@ -515,13 +532,13 @@ namespace Sanakan.Api.Controllers
             {
                 using (var db = new Database.DatabaseContext(_config))
                 {
-                    var userRelease = new List<string>() { "users" };
+                    var userRelease = new List<string>();
                     var cards = db.Cards.AsQueryable().AsSplitQuery().Where(x => x.Character == oldId);
 
                     foreach (var card in cards)
                     {
                         card.Character = newId;
-                        userRelease.Add($"user-{card.GameDeckId}");
+                        userRelease.Add(CacheTags.User(card.GameDeckId));
                     }
 
                     await db.SaveChangesAsync();
@@ -550,7 +567,7 @@ namespace Sanakan.Api.Controllers
             {
                 using (var db = new Database.DatabaseContext(_config))
                 {
-                    var userRelease = new List<string>() { "users" };
+                    var userRelease = new List<string>();
                     var cards = db.Cards.AsQueryable().AsSplitQuery().Where(x => x.Character == id);
 
                     foreach (var card in cards)
@@ -567,7 +584,7 @@ namespace Sanakan.Api.Controllers
                         }
                         catch (Exception) { }
 
-                        userRelease.Add($"user-{card.GameDeckId}");
+                        userRelease.Add(CacheTags.User(card.GameDeckId));
                     }
 
                     await db.SaveChangesAsync();
@@ -608,7 +625,7 @@ namespace Sanakan.Api.Controllers
                 {
                     using (var db = new Database.DatabaseContext(_config))
                     {
-                        var userRelease = new List<string>() { "users" };
+                        var userRelease = new List<string>();
                         var cards = db.Cards.AsQueryable().AsSplitQuery().Where(x => x.Character == id);
 
                         foreach (var card in cards)
@@ -621,7 +638,7 @@ namespace Sanakan.Api.Controllers
                             }
                             catch (Exception) { }
 
-                            userRelease.Add($"user-{card.GameDeckId}");
+                            userRelease.Add(CacheTags.User(card.GameDeckId));
                         }
 
                         await db.SaveChangesAsync();
@@ -688,7 +705,7 @@ namespace Sanakan.Api.Controllers
         /// <response code="403">Card already exist</response>
         /// <response code="404">Card not found</response>
         /// <response code="500">Card not generated</response>
-        [HttpGet("card/{id}")]
+        [HttpGet("card/{id}"), AllowAnonymous]
         public async Task<IActionResult> GetCardAsync(ulong id)
         {
             bool miniature = System.IO.File.Exists($"{Services.Dir.CardsMiniatures}/{id}.webp") || System.IO.File.Exists($"{Services.Dir.CardsMiniatures}/{id}.gif");
@@ -708,7 +725,6 @@ namespace Sanakan.Api.Controllers
                     return "Card not found!".ToResponse(404);
                 }
 
-                _waifu.DeleteCardImageIfExist(card);
                 var cardImage = await _waifu.GenerateAndSaveCardAsync(card, CardImageType.Normal, true);
                 if (!System.IO.File.Exists(cardImage))
                 {
@@ -752,7 +768,7 @@ namespace Sanakan.Api.Controllers
 
                         await dbs.SaveChangesAsync();
 
-                        QueryCacheManager.ExpireTag(new string[] { $"user-{botUser.Id}", "users" });
+                        QueryCacheManager.ExpireTag(new string[] { CacheTags.User(botUser.Id) });
                     }
                 }), id);
 
@@ -799,7 +815,7 @@ namespace Sanakan.Api.Controllers
 
                         await dbs.SaveChangesAsync();
 
-                        QueryCacheManager.ExpireTag(new string[] { $"user-{botUser.Id}", "users" });
+                        QueryCacheManager.ExpireTag(new string[] { CacheTags.User(botUser.Id) });
                     }
                 }), user.Id);
 
@@ -875,7 +891,7 @@ namespace Sanakan.Api.Controllers
 
                     await db.SaveChangesAsync();
 
-                    QueryCacheManager.ExpireTag(new string[] { $"user-{botUser.Id}", "users" });
+                    QueryCacheManager.ExpireTag(new string[] { CacheTags.User(botUser.Id) });
                 }
             }), discordId);
 
@@ -983,7 +999,7 @@ namespace Sanakan.Api.Controllers
 
                             await db.SaveChangesAsync();
 
-                            QueryCacheManager.ExpireTag(new string[] { $"user-{botUser.Id}", "users" });
+                            QueryCacheManager.ExpireTag(new string[] { CacheTags.User(botUser.Id) });
                             cards = opened;
                         }
                     }), discordId);
@@ -1056,7 +1072,7 @@ namespace Sanakan.Api.Controllers
 
                             await db.SaveChangesAsync();
 
-                            QueryCacheManager.ExpireTag(new string[] { $"user-{botUser.Id}", "users" });
+                            QueryCacheManager.ExpireTag(new string[] { CacheTags.User(botUser.Id) });
                             result = "Card status toggled".ToResponse(200);
                         }
                     }), discordId);
@@ -1157,7 +1173,8 @@ namespace Sanakan.Api.Controllers
 
         private async Task UpdateWishlistCountAsync(Database.DatabaseContext db, List<Card> cards, User user)
         {
-            var allWWCnt = await db.WishlistCountData.AsQueryable().AsNoTracking().ToListAsync();
+            var ids = cards.Select(x => x.Character).Distinct().ToList();
+            var allWWCnt = await db.WishlistCountData.AsQueryable().AsNoTracking().Where(x => ids.Contains(x.Id)).ToListAsync();
 
             foreach (var card in cards)
             {
@@ -1212,5 +1229,21 @@ namespace Sanakan.Api.Controllers
 
             return cards;
         }
+
+        private static ObjectResult ValidateFilter(CardsQueryFilter filter)
+        {
+            if (filter == null)
+                return "Filter is required!".ToResponse(400);
+
+            if (filter.SearchText != null && filter.SearchText.Length > MaxSearchTextLength)
+                return $"Search text too long (max {MaxSearchTextLength})!".ToResponse(400);
+
+            if (TooMany(filter.CardIds) || TooMany(filter.CharIds) || TooMany(filter.IncludeTags) || TooMany(filter.ExcludeTags))
+                return $"Too many filter items (max {MaxFilterItems})!".ToResponse(400);
+
+            return null;
+        }
+
+        private static bool TooMany<T>(List<T> list) => list != null && list.Count > MaxFilterItems;
     }
 }
