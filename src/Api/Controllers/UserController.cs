@@ -16,6 +16,7 @@ using Microsoft.Extensions.Caching.Memory;
 using Microsoft.IdentityModel.Tokens;
 using Sanakan.Api.Models;
 using Sanakan.Config;
+using Sanakan.Config.Model;
 using Sanakan.Extensions;
 using Sanakan.Services.Executor;
 using Sanakan.Services.Time;
@@ -151,7 +152,7 @@ namespace Sanakan.Api.Controllers
         {
             using (var db = new Database.DatabaseContext(_config))
             {
-                var user = await db.Users.AsQueryable().AsSplitQuery().Where(x => x.Shinden == id).Include(x => x.GameDeck).AsNoTracking().FirstOrDefaultAsync();
+                var user = await db.Users.AsQueryable().AsSplitQuery().Where(x => id != 0 && x.Shinden == id).Include(x => x.GameDeck).AsNoTracking().FirstOrDefaultAsync();
                 if (user == null)
                 {
                     return "User not found!".ToResponse(404);
@@ -196,7 +197,7 @@ namespace Sanakan.Api.Controllers
         {
             using (var db = new Database.DatabaseContext(_config))
             {
-                var discordId = await db.Users.AsQueryable().Where(x => x.Shinden == id).AsNoTracking().Select(x => (ulong?)x.Id).FirstOrDefaultAsync();
+                var discordId = await db.Users.AsQueryable().Where(x => id != 0 && x.Shinden == id).AsNoTracking().Select(x => (ulong?)x.Id).FirstOrDefaultAsync();
                 if (discordId == null)
                 {
                     return "User not found!".ToResponse(404);
@@ -257,7 +258,7 @@ namespace Sanakan.Api.Controllers
         {
             using (var db = new Database.DatabaseContext(_config))
             {
-                var user = await db.Users.AsQueryable().AsSplitQuery().Where(x => x.Shinden == id).AsNoTracking().FirstOrDefaultAsync();
+                var user = await db.Users.AsQueryable().AsSplitQuery().Where(x => id != 0 && x.Shinden == id).AsNoTracking().FirstOrDefaultAsync();
                 if (user == null)
                 {
                     return "User not found!".ToResponse(404);
@@ -273,6 +274,11 @@ namespace Sanakan.Api.Controllers
                 if (userOnGuild == null)
                 {
                     return "User not found!".ToResponse(404);
+                }
+
+                if (string.IsNullOrWhiteSpace(nickname) || nickname.Length > 32)
+                {
+                    return "Invalid nickname!".ToResponse(400);
                 }
 
                 await userOnGuild.ModifyAsync(x => x.Nickname = nickname);
@@ -292,6 +298,11 @@ namespace Sanakan.Api.Controllers
         public async Task<IActionResult> RegisterUserAsync([FromBody, Required]UserRegistration id)
         {
             if (id == null)
+            {
+                return "Model is Invalid!".ToResponse(500);
+            }
+
+            if (string.IsNullOrWhiteSpace(id.Username) || id.Username.Length > 256)
             {
                 return "Model is Invalid!".ToResponse(500);
             }
@@ -338,7 +349,7 @@ namespace Sanakan.Api.Controllers
 
                     if (oldUsers.Count > 0)
                     {
-                        var rmcs = _config.Get().RMConfig.Where(x => x.Type == RichMessageType.AdminNotify);
+                        var rmcs = (_config.Get().RMConfig ?? Enumerable.Empty<RichMessageConfig>()).Where(x => x.Type == RichMessageType.AdminNotify);
                         foreach (var rmc in rmcs)
                         {
                             var guild = _client.GetGuild(rmc.GuildId);
@@ -447,7 +458,7 @@ namespace Sanakan.Api.Controllers
         {
             using (var db = new Database.DatabaseContext(_config))
             {
-                var user = db.Users.FirstOrDefault(x => x.Shinden == id);
+                var user = db.Users.FirstOrDefault(x => id != 0 && x.Shinden == id);
                 if (user == null)
                 {
                     return "User not found!".ToResponse(404);
@@ -457,7 +468,7 @@ namespace Sanakan.Api.Controllers
                 {
                     using (var dbs = new Database.DatabaseContext(_config))
                     {
-                        user = await dbs.Users.AsQueryable().FirstOrDefaultAsync(x => x.Shinden == id);
+                        user = await dbs.Users.AsQueryable().FirstOrDefaultAsync(x => id != 0 && x.Shinden == id);
                         if (user == null) return;
 
                         var beforeChange = user.TcCnt;

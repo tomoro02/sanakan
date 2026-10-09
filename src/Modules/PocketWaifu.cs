@@ -4,6 +4,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Threading;
 using System.Threading.Tasks;
 using Discord;
 using Discord.Commands;
@@ -598,7 +599,7 @@ namespace Sanakan.Modules
 
                 if (numberOfPack == 0)
                 {
-                    await SafeReplyAsync("", embed: _waifu.GetBoosterPackList(Context.User, bUser.GameDeck.BoosterPacks.ToList()));
+                    await SafeReplyAsync("", embed: _waifu.GetBoosterPackList(Context.User, bUser.GameDeck.BoosterPacks.OrderBy(x => x.Id).ToList()));
                     return;
                 }
 
@@ -614,7 +615,7 @@ namespace Sanakan.Modules
                     return;
                 }
 
-                var packs = bUser.GameDeck.BoosterPacks.ToList().GetRange(numberOfPack - 1, count);
+                var packs = bUser.GameDeck.BoosterPacks.OrderBy(x => x.Id).ToList().GetRange(numberOfPack - 1, count);
                 var cardsCount = packs.Sum(x => x.CardCnt);
 
                 if (cardsCount > 20)
@@ -640,7 +641,7 @@ namespace Sanakan.Modules
 
                 var totalCards = new List<Card>();
                 var destroyedCards = new List<Card>();
-                var charactersOnWishlist = new List<string>();
+                var charactersOnWishlist = new HashSet<ulong>();
                 foreach (var pack in packs)
                 {
                     var cards = await _waifu.OpenBoosterPackAsync(Context.User, pack, bUser.PoolType);
@@ -670,11 +671,21 @@ namespace Sanakan.Modules
                 foreach (var card in totalCards)
                 {
                     if (await bUser.GameDeck.RemoveCharacterFromWishListAsync(card.Character, db))
-                        charactersOnWishlist.Add(card.Name);
+                    {
+                        charactersOnWishlist.Add(card.Character);
+
+                        // zaktualizuj lokalny snapshot, aby kolejne karty tej samej postaci widziały nowy licznik
+                        var removed = allWWCnt.FirstOrDefault(x => x.Id == card.Character);
+                        if (removed != null)
+                        {
+                            removed.Count = Math.Max(0, removed.Count - 1);
+                            removed.ACount = Math.Max(0, removed.ACount - 1);
+                        }
+                    }
 
                     if (checkWishlists)
                     {
-                        bool isOnUserWishlist = charactersOnWishlist.Any(x => x == card.Name);
+                        bool isOnUserWishlist = charactersOnWishlist.Contains(card.Character);
                         var thisCardWishlistInfo = allWWCnt.FirstOrDefault(x => x.Id == card.Character);
                         var wishlistsCnt = thisCardWishlistInfo?.Count ?? 0;
                         var awishlistsCnt = thisCardWishlistInfo?.ACount ?? 0;
@@ -719,7 +730,7 @@ namespace Sanakan.Modules
                 {
                     if (checkWishlists)
                     {
-                        bool isOnUserWishlist = charactersOnWishlist.Any(x => x == card.Name);
+                        bool isOnUserWishlist = charactersOnWishlist.Contains(card.Character);
                         if (destroyedCards.Any(x => x.Id == card.Id))
                         {
                             openString += "🖤 ";
@@ -934,7 +945,9 @@ namespace Sanakan.Modules
                 if (card.Quality != Quality.Broken)
                 {
                     var cardOverflowPower = (int)card.Quality + card.BorderOverflow;
-                    if (card.Quality == Quality.Omega || card.Quality.Fake(card.BorderOverflow) == Quality.Omega)
+                    // cap liczbowy (zachowanie pierwotne z 6f54212): pozwala na większy overflow,
+                    // a saturujący Fake/Next gwarantuje brak crashu przy dużym BorderOverflow
+                    if (card.Quality == Quality.Omega || cardOverflowPower >= (int)Quality.Omega)
                     {
                         await SafeReplyAsync("", embed: $"{Context.User.Mention} tej karty nie można już ulepszyć.".ToEmbedMessage(EMType.Error).Build());
                         return;
@@ -1738,17 +1751,39 @@ namespace Sanakan.Modules
                 {
                     bUser.GameDeck.Karma += 0.01;
 
-                    foreach (var card in cardsInCage)
+                    var cageList = cardsInCage.ToList();
+                    var nick = (user.Nickname ?? user.GlobalName) ?? user.Username;
+
+                    // pobierz dane postaci równolegle (z ograniczeniem), zamiast sekwencyjnych żądań w pętli
+                    var charInfos = new Dictionary<ulong, Sden.Models.ICharacterInfo>();
+                    using (var gate = new SemaphoreSlim(5))
+                    {
+                        var fetches = cageList.Select(async card =>
+                        {
+                            await gate.WaitAsync();
+                            try
+                            {
+                                return (Character: card.Character, Info: await _shinden.GetCharacterInfoAsync(card.Character));
+                            }
+                            finally
+                            {
+                                gate.Release();
+                            }
+                        }).ToList();
+
+                        foreach (var fetched in await Task.WhenAll(fetches))
+                            if (fetched.Info != null) charInfos[fetched.Character] = fetched.Info;
+                    }
+
+                    foreach (var card in cageList)
                     {
                         card.InCage = false;
-                        var charInfo = await _shinden.GetCharacterInfoAsync(card.Character);
-                        if (charInfo != null)
+
+                        if (charInfos.TryGetValue(card.Character, out var charInfo)
+                            && charInfo?.Points != null
+                            && charInfo.Points.Any(x => x.Name.Equals(nick)))
                         {
-                            if (charInfo?.Points != null)
-                            {
-                                if (charInfo.Points.Any(x => x.Name.Equals((user.Nickname ?? user.GlobalName) ?? user.Username)))
-                                    card.Affection += 0.8;
-                            }
+                            card.Affection += 0.8;
                         }
 
                         var span = _time.Now() - card.CreationDate;
@@ -2054,7 +2089,8 @@ namespace Sanakan.Modules
             [Summary("czy zamienić oznaczenia na nicki?")] bool showNames = false,
             [Summary("czy dodać linki do profili?")] bool showShindenUrl = false,
             [Summary("czy ignorować anime?")] bool ignoreTitles = false,
-            [Summary("czy wysłać jako plik tekstowy?")] bool tldr = false)
+            [Summary("czy wysłać jako plik tekstowy?")] bool tldr = false,
+            [Summary("czy ukryć nieaktywnych użytkowników?")] bool hideInactive = false)
         {
             var user = (usr ?? Context.User) as SocketGuildUser;
             if (user == null) return;
@@ -2063,7 +2099,7 @@ namespace Sanakan.Modules
             {
                 var bUser = await db.GetCachedFullUserAsync(user.Id);
                 var res = await _waifu.CheckWishlistAndSendToDMAsync(db, Context.User, bUser, !showFavs,
-                    !showBlocked, !showNames, showShindenUrl, Context.Guild, false, 0, ignoreTitles, tldr);
+                    !showBlocked, !showNames, showShindenUrl, Context.Guild, false, 0, ignoreTitles, tldr, hideInactive);
 
                 await SafeReplyAsync("", embed: res.ToEmbedMessage($"{Context.User.Mention} ").Build());
             }
@@ -2080,7 +2116,8 @@ namespace Sanakan.Modules
             [Summary("czy zamienić oznaczenia na nicki?")] bool showNames = false,
             [Summary("czy dodać linki do profili?")] bool showShindenUrl = false,
             [Summary("czy ignorować anime?")] bool ignoreTitles = false,
-            [Summary("czy wysłać jako plik tekstowy?")] bool tldr = false)
+            [Summary("czy wysłać jako plik tekstowy?")] bool tldr = false,
+            [Summary("czy ukryć nieaktywnych użytkowników?")] bool hideInactive = false)
         {
             var userf = (usrf ?? Context.User) as SocketGuildUser;
             if (userf == null) return;
@@ -2096,7 +2133,7 @@ namespace Sanakan.Modules
                 var bUser = await db.GetCachedFullUserAsync(user.Id);
                 ulong searchId = userf.Id == Context.Client.CurrentUser.Id ? 1 : userf.Id;
                 var res = await _waifu.CheckWishlistAndSendToDMAsync(db, Context.User, bUser, !showFavs,
-                    !showBlocked, !showNames, showShindenUrl, Context.Guild, false, searchId, ignoreTitles, tldr);
+                    !showBlocked, !showNames, showShindenUrl, Context.Guild, false, searchId, ignoreTitles, tldr, hideInactive);
 
                 await SafeReplyAsync("", embed: res.ToEmbedMessage($"{Context.User.Mention} ").Build());
             }
@@ -3326,7 +3363,7 @@ namespace Sanakan.Modules
         [Alias("who")]
         [Summary("pozwala wyszukać użytkowników posiadających kartę danej postaci")]
         [Remarks("51 tak tak"), RequireWaifuCommandChannel]
-        public async Task SearchCharacterCardsAsync([Summary("id postaci na shinden")] ulong id, [Summary("czy zamienić oznaczenia na nicki?")] bool showNames = false, [Summary("czy dodać linki do profili?")] bool showShindenUrl = false, [Summary("czy wyświetlić tylko karty ze skalpelem/kamerą?")] bool onlyScalpels = false, [Summary("czy sortować po użytkowniku?")] bool groupByUser = false)
+        public async Task SearchCharacterCardsAsync([Summary("id postaci na shinden")] ulong id, [Summary("czy zamienić oznaczenia na nicki?")] bool showNames = false, [Summary("czy dodać linki do profili?")] bool showShindenUrl = false, [Summary("czy wyświetlić tylko karty ze skalpelem/kamerą?")] bool onlyScalpels = false, [Summary("czy sortować po użytkowniku?")] bool groupByUser = false, [Summary("czy ukryć nieaktywnych użytkowników?")] bool hideInactive = false)
         {
             var charInfo = await _shinden.GetCharacterInfoAsync(id);
             if (charInfo == null)
@@ -3338,6 +3375,9 @@ namespace Sanakan.Modules
             using (var db = new Database.DatabaseContext(Config))
             {
                 var cards = await db.Cards.Include(x => x.Tags).Include(x => x.GameDeck).ThenInclude(x => x.User).Where(x => x.Character == id).AsNoTracking().FromCacheAsync(new MemoryCacheEntryOptions { AbsoluteExpirationRelativeToNow = TimeSpan.FromHours(1) }, CacheTags.Character(id));
+
+                if (hideInactive)
+                    cards = cards.Where(x => x.GameDeck.IsUserActive(_time.Now()));
 
                 if (onlyScalpels)
                     cards = cards.Where(x => !string.IsNullOrEmpty(x.CustomImage));
@@ -3369,7 +3409,8 @@ namespace Sanakan.Modules
         [Remarks("tak tak"), RequireWaifuCommandChannel]
         public async Task SearchCharacterCardsFromFavListAsync([Summary("czy pokazać ulubione domyślnie ukryte? (true/false)")] bool showFavs = false,
             [Summary("czy zamienić oznaczenia na nicki?")] bool showNames = false,
-            [Summary("czy dodać linki do profili?")] bool showShindenUrl = false)
+            [Summary("czy dodać linki do profili?")] bool showShindenUrl = false,
+            [Summary("czy ukryć nieaktywnych użytkowników?")] bool hideInactive = false)
         {
             using (var db = new Database.DatabaseContext(Config))
             {
@@ -3395,6 +3436,9 @@ namespace Sanakan.Modules
                     var tid = _tags.GetTagId(Services.PocketWaifu.TagType.Favorite);
                     cards = cards.Where(x => !x.Tags.Any(t => t.Id == tid)).ToList();
                 }
+
+                if (hideInactive)
+                    cards = cards.Where(x => x.GameDeck.IsUserActive(_time.Now())).ToList();
 
                 if (cards.Count < 1)
                 {
@@ -3466,7 +3510,7 @@ namespace Sanakan.Modules
         [Alias("which")]
         [Summary("pozwala wyszukać użytkowników posiadających karty z danego tytułu")]
         [Remarks("1 tak nie"), RequireWaifuCommandChannel]
-        public async Task SearchCharacterCardsFromTitleAsync([Summary("id serii na shinden")] ulong id, [Summary("czy zamienić oznaczenia na nicki?")] bool showNames = false, [Summary("ukryć posiadane?")] bool hiddeOwned = false)
+        public async Task SearchCharacterCardsFromTitleAsync([Summary("id serii na shinden")] ulong id, [Summary("czy zamienić oznaczenia na nicki?")] bool showNames = false, [Summary("ukryć posiadane?")] bool hiddeOwned = false, [Summary("czy ukryć nieaktywnych użytkowników?")] bool hideInactive = false)
         {
             var response = await _shclient.Title.GetCharactersAsync(id);
             if (!response.IsSuccessStatusCode())
@@ -3500,7 +3544,10 @@ namespace Sanakan.Modules
                     }
                 }
 
-                var cards = await db.Cards.AsQueryable().Include(x => x.Tags).Include(x => x.GameDeck).AsSplitQuery().Where(x => characterIds.Contains(x.Character)).AsNoTracking().FromCacheAsync(new MemoryCacheEntryOptions { AbsoluteExpirationRelativeToNow = TimeSpan.FromHours(1) }, characterIds.Where(x => x.HasValue).Select(x => CacheTags.Character(x.Value)).Distinct().ToArray());
+                var cards = await db.Cards.AsQueryable().Include(x => x.Tags).Include(x => x.GameDeck).ThenInclude(x => x.User).AsSplitQuery().Where(x => characterIds.Contains(x.Character)).AsNoTracking().FromCacheAsync(new MemoryCacheEntryOptions { AbsoluteExpirationRelativeToNow = TimeSpan.FromHours(1) }, characterIds.Where(x => x.HasValue).Select(x => CacheTags.Character(x.Value)).Distinct().ToArray());
+                if (hideInactive)
+                    cards = cards.Where(x => x.GameDeck.IsUserActive(_time.Now()));
+
                 if (cards.Count() < 1)
                 {
                     await SafeReplyAsync("", embed: $"Nie odnaleziono kart.".ToEmbedMessage(EMType.Error).Build());
@@ -4263,7 +4310,7 @@ namespace Sanakan.Modules
 
                 if (bUser.GameDeck.CanCreateDemon())
                 {
-                    if (thisCard.Dere == Dere.Yami)
+                    if (thisCard.Dere.BlocksDemonTransform())
                     {
                         await SafeReplyAsync("", embed: $"{Context.User.Mention} ta karta została już przeistoczona wcześniej.".ToEmbedMessage(EMType.Error).Build());
                         return;
@@ -4300,7 +4347,7 @@ namespace Sanakan.Modules
                 }
                 else if (bUser.GameDeck.CanCreateAngel())
                 {
-                    if (thisCard.Dere == Dere.Raito)
+                    if (thisCard.Dere.BlocksAngelTransform())
                     {
                         await SafeReplyAsync("", embed: $"{Context.User.Mention} ta karta została już przeistoczona wcześniej.".ToEmbedMessage(EMType.Error).Build());
                         return;

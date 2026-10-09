@@ -54,7 +54,7 @@ namespace Sanakan.Api.Controllers
         /// <returns>pakiety, numer odpowiada numerowi w api/waifu/boosterpack/open/{numer}</returns>
         [HttpGet("boosterpacks"), ProducesResponseType(typeof(List<UserBoosterPack>), 200)]
         public Task<IActionResult> GetUserBoosterPacksAsync()
-            => WithCachedPlayerAsync(user => user.GameDeck.BoosterPacks.Select((x, i) => UserBoosterPack.From(x, i + 1)).ToList());
+            => WithCachedPlayerAsync(user => user.GameDeck.BoosterPacks.OrderBy(x => x.Id).Select((x, i) => UserBoosterPack.From(x, i + 1)).ToList());
 
         /// <summary>
         /// Pobiera listę przedmiotów użytkownika
@@ -291,8 +291,13 @@ namespace Sanakan.Api.Controllers
 
             return RunAsPlayerAsync("gallery-order", async (db, discordId) =>
             {
+                var unique = wids.Distinct().ToList();
+                var owned = await db.Cards.AsQueryable().Where(x => x.GameDeckId == discordId && unique.Contains(x.Id)).Select(x => x.Id).ToListAsync();
+                if (owned.Count != unique.Count)
+                    return "Some cards are not yours!".ToResponse(400);
+
                 var buser = await db.GetUserOrCreateSimpleAsync(discordId);
-                buser.GameDeck.GalleryOrderedIds = string.Join(" ", wids);
+                buser.GameDeck.GalleryOrderedIds = string.Join(" ", unique);
                 await db.SaveChangesAsync();
 
                 return "Gallery order changed!".ToResponse(200);
@@ -433,7 +438,8 @@ namespace Sanakan.Api.Controllers
             if (!await _executor.TryAdd(exe, TimeSpan.FromSeconds(1)))
                 return "Command queue is full".ToResponse(503);
 
-            await exe.WaitAsync();
+            if (!await exe.WaitAsync(Executable.ApiMaxWait))
+                return "Command timed out".ToResponse(504);
             return result;
         }
 

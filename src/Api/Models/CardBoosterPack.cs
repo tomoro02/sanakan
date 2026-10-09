@@ -17,7 +17,7 @@ namespace Sanakan.Api.Models
         /// <summary>
         /// Gwarantowana jakość jednej z kart, E - 100% losowanie
         /// </summary>
-        public Rarity Rarity { get; set; }
+        public Rarity Rarity { get; set; } = Rarity.E;
         /// <summary>
         /// Wykluczone jakości z losowania, Gwarantowana ma wyższy priorytet
         /// </summary>
@@ -57,15 +57,15 @@ namespace Sanakan.Api.Models
                 }
             }
 
-            switch (Pool.Type)
+            switch (Pool?.Type ?? CardsPoolType.Random)
             {
                 case CardsPoolType.Title:
-                    pack.Title = Pool.TitleId;
+                    pack.Title = Pool?.TitleId ?? 0;
                 break;
 
                 case CardsPoolType.List:
                     pack.Title = 0;
-                    foreach (var id in Pool.Character)
+                    foreach (var id in Pool?.Character ?? new List<ulong>())
                         pack.Characters.Add(new BoosterPackCharacter() { Character = id });
                 break;
 
