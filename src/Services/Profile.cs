@@ -157,30 +157,43 @@ namespace Sanakan.Services
                         if (sub.IsActive(_time.Now()))
                             continue;
 
+                        var guild = _client.GetGuild(sub.Guild);
+                        if (guild != null)
+                        {
+                            try
+                            {
+                                switch (sub.Type)
+                                {
+                                    case StatusType.Globals:
+                                        var guildConfig = await db.GetCachedGuildFullConfigAsync(sub.Guild);
+                                        await RemoveRoleAsync(guild, guildConfig?.GlobalEmotesRole ?? 0, sub.UserId);
+                                        break;
+
+                                    case StatusType.Color:
+                                        await RomoveUserColorAsync(guild.GetUser(sub.UserId));
+                                        break;
+
+                                    case StatusType.RainbowColor:
+                                        await RemoveUserRainbowColorAsync(guild.GetUser(sub.UserId), GetRainbowColorNameStart());
+                                        break;
+
+                                    default:
+                                        break;
+                                }
+                            }
+                            catch (Discord.Net.HttpException ex) when (ex.DiscordCode == DiscordErrorCode.UnknownMember)
+                            {
+                                // stale member cache - the user is no longer in the guild
+                            }
+                            catch (Exception ex)
+                            {
+                                _logger.LogError($"Profile: subs check {sub.Id}: {ex}");
+                                continue;
+                            }
+                        }
+
                         save = true;
                         sub.BValue = false;
-                        var guild = _client.GetGuild(sub.Guild);
-                        if (guild == null)
-                            continue;
-
-                        switch (sub.Type)
-                        {
-                            case StatusType.Globals:
-                                var guildConfig = await db.GetCachedGuildFullConfigAsync(sub.Guild);
-                                await RemoveRoleAsync(guild, guildConfig?.GlobalEmotesRole ?? 0, sub.UserId);
-                                break;
-
-                            case StatusType.Color:
-                                await RomoveUserColorAsync(guild.GetUser(sub.UserId));
-                                break;
-
-                            case StatusType.RainbowColor:
-                                await RemoveUserRainbowColorAsync(guild.GetUser(sub.UserId), GetRainbowColorNameStart());
-                                break;
-
-                            default:
-                                break;
-                        }
                     }
 
                     if (save)
@@ -349,10 +362,22 @@ namespace Sanakan.Services
 
         public async Task<SixLabors.ImageSharp.Image> GetProfileImageAsync(SocketGuildUser user, Database.Models.User botUser, long topPosition)
         {
-            bool isConnected = botUser.Shinden != 0;
-            var response = _shClient.User.GetAsync(botUser.Shinden);
+            global::Shinden.Models.IUserInfo shindenUser = null;
+            if (botUser.Shinden != 0)
+            {
+                try
+                {
+                    var response = await _shClient.User.GetAsync(botUser.Shinden);
+                    if (response.IsSuccessStatusCode())
+                        shindenUser = response.Body;
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogError($"Profile: shinden user {botUser.Shinden}: {ex.Message}");
+                }
+            }
 
-            return await _img.GetUserProfileAsync(isConnected ? (await response).Body : null, botUser, user.GetUserOrDefaultAvatarUrl(true),
+            return await _img.GetUserProfileAsync(shindenUser, botUser, user.GetUserOrDefaultAvatarUrl(true),
                 topPosition, user.GetUserNickInGuild(), user.Roles.OrderByDescending(x => x.Position).FirstOrDefault()?.Color ?? Discord.Color.DarkerGrey);
         }
 
