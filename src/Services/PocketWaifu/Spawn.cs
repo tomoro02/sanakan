@@ -14,9 +14,7 @@ using Sanakan.Database.Models;
 using Sanakan.Extensions;
 using Sanakan.Services.Executor;
 using Sanakan.Services.Time;
-using Shinden.Logger;
-using Shinden.Models;
-using Z.EntityFramework.Plus;
+using Sanakan.ShindenCompat.Models;
 
 namespace Sanakan.Services.PocketWaifu
 {
@@ -62,7 +60,7 @@ namespace Sanakan.Services.PocketWaifu
             }
             catch (Exception ex)
             {
-                _logger.LogError($"Spawn: zapis dump.json: {ex.Message}");
+                _logger.LogError($"Spawn: saving dump.json: {ex.Message}");
             }
         }
 
@@ -116,7 +114,7 @@ namespace Sanakan.Services.PocketWaifu
             }
             catch (Exception ex)
             {
-                _logger.LogError($"Spawn: odczyt dump.json: {ex.Message}");
+                _logger.LogError($"Spawn: loading dump.json: {ex.Message}");
             }
         }
 
@@ -164,15 +162,13 @@ namespace Sanakan.Services.PocketWaifu
                         {
                             if (watch.ElapsedMilliseconds > 60000)
                             {
-                                embed.Description = $"Timeout!";
-                                await msg.ModifyAsync(x => x.Embed = embed.Build());
+                                await msg.ModifyAsync(x => x.Embed = SafariFailed(embed, "Nie udało się wylosować zwycięzcy, karta uciekła."));
                                 return;
                             }
 
                             if (users.Count < 1)
                             {
-                                embed.Description = $"Na polowanie nie stawił się żaden łowca!";
-                                await msg.ModifyAsync(x => x.Embed = embed.Build());
+                                await msg.ModifyAsync(x => x.Embed = SafariFailed(embed, "Na polowanie nie stawił się żaden łowca, karta uciekła."));
                                 return;
                             }
 
@@ -196,11 +192,21 @@ namespace Sanakan.Services.PocketWaifu
                 }
                 catch (Exception ex)
                 {
-                    _logger.LogError($"In Safari: {ex}");
+                    _logger.LogError($"Spawn: safari: {ex}");
                     await msg.ModifyAsync(x => x.Embed = "Karta uciekła!".ToEmbedMessage(EMType.Error).Build());
                     await msg.RemoveAllReactionsAsync();
                 }
             });
+        }
+
+        private const string SafariFinishedTitle = "🎯 Polowanie zakończone";
+
+        public static Embed SafariFailed(EmbedBuilder embed, string reason)
+        {
+            embed.Title = SafariFinishedTitle;
+            embed.Description = reason;
+            embed.Color = new Color(128, 132, 142);
+            return embed.Build();
         }
 
         private Executable GetSafariExe(EmbedBuilder embed, IUserMessage msg, Card newCard,
@@ -226,7 +232,7 @@ namespace Sanakan.Services.PocketWaifu
 
                     await db.SaveChangesAsync();
 
-                    QueryCacheManager.ExpireTag(new string[] { CacheTags.User(botUser.Id) });
+                    QueryCache.ExpireTag(new string[] { CacheTags.User(botUser.Id) });
 
                     if (db.AddActivityFromNewCard(newCard, isOnUserWishlist, _time, botUser, winner.GetUserNickInGuild()))
                     {
@@ -239,6 +245,7 @@ namespace Sanakan.Services.PocketWaifu
                     try
                     {
                         embed.ImageUrl = await _waifu.GetSafariViewAsync(pokeImage, newCard, trashChannel);
+                        embed.Title = SafariFinishedTitle;
                         embed.Description = $"{winner.Mention} zdobył na polowaniu i wsadził do klatki:\n"
                                         + $"{newCard.ToHeartWishlist(isOnUserWishlist)}{newCard.GetString(false, false, true)}\n({newCard.Title})";
                         await msg.ModifyAsync(x => x.Embed = embed.Build());
@@ -252,9 +259,13 @@ namespace Sanakan.Services.PocketWaifu
                         var priv = await winner.CreateDMChannelAsync();
                         if (priv != null) await priv.SendMessageAsync("", false, privEmb.Build());
                     }
+                    catch (Exception ex) when (global::Sanakan.Services.Helper.IsDmClosed(ex))
+                    {
+                        // the card is already given, the DM only repeats what the channel shows
+                    }
                     catch (Exception ex)
                     {
-                        _logger.LogError($"In Safari: {ex}");
+                        _logger.LogError($"Spawn: safari: {ex}");
                     }
                 });
             }), winner.Id);
@@ -265,7 +276,7 @@ namespace Sanakan.Services.PocketWaifu
             var character = await _waifu.GetRandomCharacterAsync(CharacterPoolType.Anime);
             if (character.CharInfo == null)
             {
-                _logger.LogError("In Safari: bad shinden connection");
+                _logger.LogError("Spawn: safari: bad shinden connection");
                 return;
             }
 
@@ -278,8 +289,9 @@ namespace Sanakan.Services.PocketWaifu
             var time = _time.Now().AddMinutes(5);
             var embed = new EmbedBuilder
             {
+                Title = "🎯 Polowanie",
                 Color = EMType.Bot.Color(),
-                Description = $"**Polowanie zakończy się** {time.ToRemTime()}",
+                Description = $"Kliknij reakcję, żeby wziąć udział. Koniec {time.ToRemTime()}.",
                 ImageUrl = await _waifu.GetSafariViewAsync(pokeImage, trashChannel)
             };
 
@@ -315,42 +327,51 @@ namespace Sanakan.Services.PocketWaifu
             {
                 using (var db = new Database.DatabaseContext(_config))
                 {
-                    var botUser = await db.GetUserOrCreateAsync(user.Id);
-                    if (botUser.IsBlacklisted) return;
-
-                    var pCnt = botUser.TimeStatuses.FirstOrDefault(x => x.Type == Database.Models.StatusType.Packet);
-                    if (pCnt == null)
-                    {
-                        pCnt = Database.Models.StatusType.Packet.NewTimeStatus();
-                        botUser.TimeStatuses.Add(pCnt);
-                    }
-
-                    if (!pCnt.IsActive(_time.Now()))
-                    {
-                        pCnt.EndsAt = _time.Now().Date.AddDays(1);
-                        pCnt.IValue = 0;
-                    }
-
                     var pLimit = _config.Get().PacksPerDay;
                     if (pLimit < 1) pLimit = 3;
 
-                    if (++pCnt.IValue > pLimit) return;
-
-                    botUser.GameDeck.BoosterPacks.Add(new BoosterPack
-                    {
-                        CardCnt = 2,
-                        MinRarity = Rarity.E,
-                        IsCardFromPackTradable = true,
-                        Name = "Pakiet kart za aktywność",
-                        CardSourceFromPack = CardSource.Activity
-                    });
-                    await db.SaveChangesAsync();
+                    if (!await TryGrantActivityPacketAsync(db, user.Id, _time.Now(), pLimit)) return;
 
                     FireAndForget("Spawn: pakiet", () => channel.SendMessageAsync("", embed: $"{user.Mention} otrzymał pakiet losowych kart.".ToEmbedMessage(EMType.Bot).Build()));
                 }
             }), user.Id);
 
             _executor.TryAdd(exe, TimeSpan.FromSeconds(1));
+        }
+
+        internal static async Task<bool> TryGrantActivityPacketAsync(Database.DatabaseContext db, ulong userId, DateTime now, long packsPerDay)
+        {
+            // only time statuses are needed, the full load would read every card of the player
+            var botUser = await db.GetUserOrCreateSimpleAsync(userId);
+            if (botUser.IsBlacklisted) return false;
+
+            var pCnt = botUser.TimeStatuses.FirstOrDefault(x => x.Type == Database.Models.StatusType.Packet);
+            if (pCnt == null)
+            {
+                pCnt = Database.Models.StatusType.Packet.NewTimeStatus();
+                botUser.TimeStatuses.Add(pCnt);
+            }
+
+            if (!pCnt.IsActive(now))
+            {
+                pCnt.EndsAt = now.Date.AddDays(1);
+                pCnt.IValue = 0;
+            }
+
+            if (++pCnt.IValue > packsPerDay) return false;
+
+            // the simple load leaves GameDeck.BoosterPacks null, so the pack is added through the context
+            db.BoosterPacks.Add(new BoosterPack
+            {
+                CardCnt = 2,
+                MinRarity = Rarity.E,
+                IsCardFromPackTradable = true,
+                Name = "Pakiet kart za aktywność",
+                CardSourceFromPack = CardSource.Activity,
+                GameDeck = botUser.GameDeck,
+            });
+            await db.SaveChangesAsync();
+            return true;
         }
 
         private long GetMessageRealLenght(SocketUserMessage message)

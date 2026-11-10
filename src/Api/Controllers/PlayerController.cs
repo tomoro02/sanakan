@@ -13,8 +13,9 @@ using Sanakan.Database.Models;
 using Sanakan.Extensions;
 using Sanakan.Services.Executor;
 using Sanakan.Services.PocketWaifu;
+using Sanakan.Services.Session;
+using Sanakan.Services.Session.Models;
 using Sanakan.Services.Time;
-using Z.EntityFramework.Plus;
 
 namespace Sanakan.Api.Controllers
 {
@@ -39,13 +40,46 @@ namespace Sanakan.Api.Controllers
         private readonly ISystemTime _time;
         private readonly IExecutor _executor;
         private readonly TagHelper _tags;
+        private readonly Waifu _waifu;
+        private readonly SessionManager _sessions;
 
-        public PlayerController(IConfig config, ISystemTime time, IExecutor executor, TagHelper tags)
+        public PlayerController(IConfig config, ISystemTime time, IExecutor executor, TagHelper tags, Waifu waifu, SessionManager sessions)
         {
             _config = config;
             _time = time;
             _executor = executor;
             _tags = tags;
+            _waifu = waifu;
+            _sessions = sessions;
+        }
+
+        /// <summary>
+        /// Pobiera wszystkie sklepiki z ofertami, opisami, cenami i walutami zgodnymi z komendami bota.
+        /// </summary>
+        [HttpGet("shops"), ProducesResponseType(typeof(List<Shop>), 200)]
+        public IActionResult GetShopList()
+        {
+            if (!TryGetDiscordId(out _))
+                return NoClaim();
+
+            return Ok(Enum.GetValues<ShopType>().Select(type => Shop.From(_waifu, type)).ToList());
+        }
+
+        /// <summary>
+        /// Pobiera ofertę wybranego sklepiku z opisami przedmiotów, cenami i walutą.
+        /// </summary>
+        /// <param name="type">normal (0) — Sklepik za TC; pvp (1) — Koszary za PC; activity (2) — Kiosk za AC.</param>
+        /// <response code="400">Nieznany typ sklepiku.</response>
+        [HttpGet("shops/{type}"), ProducesResponseType(typeof(Shop), 200)]
+        public IActionResult GetShop(ShopType type)
+        {
+            if (!TryGetDiscordId(out _))
+                return NoClaim();
+
+            if (!Enum.IsDefined(typeof(ShopType), type))
+                return "Unknown shop type!".ToResponse(400);
+
+            return Ok(Shop.From(_waifu, type));
         }
 
         /// <summary>
@@ -54,7 +88,7 @@ namespace Sanakan.Api.Controllers
         /// <returns>pakiety, numer odpowiada numerowi w api/waifu/boosterpack/open/{numer}</returns>
         [HttpGet("boosterpacks"), ProducesResponseType(typeof(List<UserBoosterPack>), 200)]
         public Task<IActionResult> GetUserBoosterPacksAsync()
-            => WithCachedPlayerAsync(user => user.GameDeck.BoosterPacks.OrderBy(x => x.Id).Select((x, i) => UserBoosterPack.From(x, i + 1)).ToList());
+            => WithCachedPlayerAsync(user => Waifu.OrderPacksForNumbering(user.GameDeck.BoosterPacks).Select((x, i) => UserBoosterPack.From(x, i + 1)).ToList());
 
         /// <summary>
         /// Pobiera listę przedmiotów użytkownika
@@ -309,11 +343,14 @@ namespace Sanakan.Api.Controllers
         /// </summary>
         /// <param name="wid">WID posiadanej karty z postacią (karta nie może być w klatce)</param>
         /// <response code="404">Card not found or in cage</response>
-        /// <response code="409">Character already set</response>
+        /// <response code="409">Character already set / User is in an exchange</response>
         [HttpPut("waifu/{wid}")]
         public Task<IActionResult> SetWaifuAsync(ulong wid)
             => RunAsPlayerAsync("waifu", async (db, discordId) =>
             {
+                if (_sessions.SessionExist(discordId, typeof(ExchangeSession)))
+                    return "User is in an exchange!".ToResponse(409);
+
                 var buser = await db.GetUserOrCreateAsync(discordId);
                 if (wid == 0)
                 {
@@ -422,7 +459,7 @@ namespace Sanakan.Api.Controllers
             IActionResult result = null;
             var exe = new Executable($"api-{name} u{discordId}", new Func<Task>(async () =>
             {
-                using (var db = new Database.DatabaseContext(_config))
+                using (var db = CreateDatabaseContext())
                 {
                     if (!await db.Users.AsQueryable().AnyAsync(x => x.Id == discordId))
                     {
@@ -431,7 +468,7 @@ namespace Sanakan.Api.Controllers
                     }
 
                     result = await action(db, discordId);
-                    QueryCacheManager.ExpireTag(new string[] { CacheTags.User(discordId) });
+                    QueryCache.ExpireTag(new string[] { CacheTags.User(discordId) });
                 }
             }), discordId);
 
@@ -442,6 +479,8 @@ namespace Sanakan.Api.Controllers
                 return "Command timed out".ToResponse(504);
             return result;
         }
+
+        protected virtual Database.DatabaseContext CreateDatabaseContext() => new Database.DatabaseContext(_config);
 
         private bool TryGetDiscordId(out ulong discordId)
         {

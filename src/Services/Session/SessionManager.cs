@@ -4,7 +4,6 @@ using Discord;
 using Discord.Commands;
 using Discord.WebSocket;
 using Sanakan.Services.Executor;
-using Shinden.Logger;
 using System;
 using System.Collections.Generic;
 using System.Linq;
@@ -108,6 +107,14 @@ namespace Sanakan.Services.Session
             }
         }
 
+        public bool SessionExist(ulong userId, Type sessionType)
+        {
+            lock (_lock)
+            {
+                return _sessions.Any(x => x.GetType() == sessionType && x.GetParticipants().Any(p => p.Id == userId));
+            }
+        }
+
         private bool SessionExistUnsafe<T>(T session) where T : ISession
             => _sessions.Where(x => x.IsOwner(session.GetParticipants()))
                 .Any(x => ((x.GetId() == null) ? (x is T) : (x.GetId() == session.GetId())));
@@ -155,7 +162,7 @@ namespace Sanakan.Services.Session
                             }
                             catch (Exception ex)
                             {
-                                _logger.LogError($"Sessions: {session.GetEventType()}-{session.GetOwner().Id}: {ex}");
+                                _logger.LogError($"Session: {session.GetEventType()}-{session.GetOwner().Id}: {ex}");
                             }
                         });
                         break;
@@ -164,7 +171,7 @@ namespace Sanakan.Services.Session
                     case RunMode.Sync:
                         session.SetDestroyer(DisposeAsync);
                         if (!await _executor.TryAdd(session.GetExecutable(context), TimeSpan.FromSeconds(1)))
-                                _logger.Log($"Sessions: {session.GetEventType()}-{session.GetOwner().Id} waiting time has been exceeded!");
+                                _logger.Log($"Session: {session.GetEventType()}-{session.GetOwner().Id} queue wait time exceeded");
                         break;
                 }
             }
@@ -265,7 +272,7 @@ namespace Sanakan.Services.Session
             }
             catch(Exception ex)
             {
-                _logger.LogError($"Session: autovalidate error {ex}");
+                _logger.LogError($"Session: autovalidate: {ex}");
             }
         }
 

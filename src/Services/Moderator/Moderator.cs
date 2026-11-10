@@ -3,6 +3,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using Discord;
@@ -14,8 +15,6 @@ using Sanakan.Database.Models.Configuration;
 using Sanakan.Database.Models.Management;
 using Sanakan.Extensions;
 using Sanakan.Services.Time;
-using Shinden.Logger;
-using Z.EntityFramework.Plus;
 
 namespace Sanakan.Services
 {
@@ -30,13 +29,19 @@ namespace Sanakan.Services
         NonSupChannels,
         WaifuCmdChannels,
         WaifuFightChannels,
-        RichMessages,
         ModeratorRoles,
         IgnoredChannels
     }
 
     public class Moderator : IDisposable
     {
+        public const string AutoAuthor = "automat";
+        // every penalty reason given by the supervisor starts with this
+        public const string AutoReasonPrefix = "Automatyczny ";
+
+        public static bool IsAutomaticReason(string reason)
+            => reason?.StartsWith(AutoReasonPrefix, StringComparison.Ordinal) ?? false;
+
         private DiscordSocketClient _client;
         private ImageProcessing _img;
         private ISystemTime _time;
@@ -74,7 +79,7 @@ namespace Sanakan.Services
                 }
                 catch (Exception ex)
                 {
-                    _logger.LogError($"in penalty: {ex}");
+                    _logger.LogError($"Mod: penalty sweep: {ex}");
                 }
                 finally
                 {
@@ -104,7 +109,7 @@ namespace Sanakan.Services
                         }
                         catch (Exception ex)
                         {
-                            _logger.LogError($"Moderator: unban: {ex}");
+                            _logger.LogError($"Mod: unban: {ex}");
                             continue;
                         }
                         await RemovePenaltyFromDb(db, penalty);
@@ -139,7 +144,7 @@ namespace Sanakan.Services
                         }
                         catch (Exception ex)
                         {
-                            _logger.LogError($"Moderator: re-mute: {ex}");
+                            _logger.LogError($"Mod: re-mute: {ex}");
                         }
                         continue;
                     }
@@ -153,7 +158,7 @@ namespace Sanakan.Services
                     }
                     catch (Exception ex)
                     {
-                        _logger.LogError($"Moderator: unmute: {ex}");
+                        _logger.LogError($"Mod: unmute: {ex}");
                         continue;
                     }
                     await RemovePenaltyFromDb(db, penalty);
@@ -168,77 +173,44 @@ namespace Sanakan.Services
 
         private EmbedBuilder GetFullConfiguration(GuildOptions config, SocketCommandContext context)
         {
-            var modsRolesCnt = config.ModeratorRoles?.Count;
-            string mods = (modsRolesCnt > 0) ? $"({modsRolesCnt}) `config mods`" : "--";
+            var guild = context.Guild;
+            var prefix = config.Prefix ?? _config.Get().Prefix;
+            string Role(ulong id) => guild.GetRole(id)?.Mention ?? "brak";
+            string Channel(ulong? id) => guild.GetTextChannel(id ?? 0)?.Mention ?? "brak";
+            string List(int? count, string type) => count > 0 ? $"{count} · `{prefix}mod config {type}`" : "brak";
 
-            var wExpCnt = config.ChannelsWithoutExp?.Count;
-            string wExp = (wExpCnt > 0) ? $"({wExpCnt}) `config wexp`" : "--";
+            var general = $"Prefiks: `{prefix}`{(config.Prefix == null ? " (domyślny)" : "")}\n"
+                + $"Nadzór: {(config.Supervision ? "włączony" : "wyłączony")} · Chaos: {(config.ChaosMode ? "włączony" : "wyłączony")}\n"
+                + $"Always-ban: {Channel(config.AlwaysBanChannel)}";
 
-            var wCntCnt = config.IgnoredChannels?.Count;
-            string wCnt = (wCntCnt > 0) ? $"({wCntCnt}) `config ignch`" : "--";
+            var roles = $"Admin: {Role(config.AdminRole)} · Semi-admin: {Role(config.SemiAdminRole)} · Tester: {Role(config.TesterRole)}\n"
+                + $"Gracz: {Role(config.UserRole)} · Wyciszenie: {Role(config.MuteRole)} · Wyciszenie moda: {Role(config.ModMuteRole)}\n"
+                + $"Globalne emotki: {Role(config.GlobalEmotesRole)} · Nitro: {Role(config.NitroRole)} · Waifu: {Role(config.WaifuRole)}";
 
-            var wSupCnt = config.ChannelsWithoutSupervision?.Count;
-            string wSup = (wSupCnt > 0) ? $"({wSupCnt}) `config wsup`" : "--";
+            var channels = $"Kary: {Channel(config.NotificationChannel)} · Powitania: {Channel(config.GreetingChannel)} · Zgłoszenia: {Channel(config.RaportChannel)}\n"
+                + $"Todo: {Channel(config.ToDoChannel)} · NSFW: {Channel(config.NsfwChannel)} · Log wiadomości: {Channel(config.LogChannel)}";
 
-            var cmdChCnt = config.CommandChannels?.Count;
-            string cmdCh = (cmdChCnt > 0) ? $"({cmdChCnt}) `config cmd`" : "--";
+            var waifu = config.WaifuConfig;
+            var gameChannels = $"Rynek: {Channel(waifu?.MarketChannel)} · Safari: {Channel(waifu?.SpawnChannel)} · Pojedynki: {Channel(waifu?.DuelChannel)}\n"
+                + $"Śmietnik walk: {Channel(waifu?.TrashFightChannel)} · Śmietnik safari: {Channel(waifu?.TrashSpawnChannel)} · Śmietnik poleceń: {Channel(waifu?.TrashCommandsChannel)}";
 
-            var rolPerLvlCnt = config.RolesPerLevel?.Count;
-            string roles = (rolPerLvlCnt > 0) ? $"({rolPerLvlCnt}) `config role`" : "--";
+            var lists = $"Role moderatorów: {List(config.ModeratorRoles?.Count, "mods")}\n"
+                + $"Kanały ignorowane: {List(config.IgnoredChannels?.Count, "ignch")}\n"
+                + $"Kanały bez doświadczenia: {List(config.ChannelsWithoutExp?.Count, "wexp")}\n"
+                + $"Kanały bez nadzoru: {List(config.ChannelsWithoutSupervision?.Count, "wsup")}\n"
+                + $"Kanały poleceń: {List(config.CommandChannels?.Count, "cmd")}\n"
+                + $"Kanały poleceń gry: {List(waifu?.CommandChannels?.Count, "wcmd")}\n"
+                + $"Kanały walk gry: {List(waifu?.FightChannels?.Count, "wfight")}\n"
+                + $"Role za poziom: {List(config.RolesPerLevel?.Count, "role")}\n"
+                + $"Role automatyczne: {List(config.SelfRoles?.Count, "selfrole")}\n"
+                + $"Krainy: {List(config.Lands?.Count, "lands")}";
 
-            var selfRolesCnt = config.SelfRoles?.Count;
-            string selfRoles = (selfRolesCnt > 0) ? $"({selfRolesCnt}) `config selfrole`" : "--";
-
-            var landsCnt = config.Lands?.Count;
-            string lands = (landsCnt > 0) ? $"({landsCnt}) `config lands`" : "--";
-
-            var wCmdCnt = config.WaifuConfig?.CommandChannels?.Count;
-            string wcmd = (wCmdCnt > 0) ? $"({wCmdCnt}) `config wcmd`" : "--";
-
-            var wFightCnt = config.WaifuConfig?.FightChannels?.Count;
-            string wfCh = (wFightCnt > 0) ? $"({wFightCnt}) `config wfight`" : "--";
-
-            return new EmbedBuilder
-            {
-                Color = EMType.Bot.Color(),
-                Description = $"**Prefix:** {config.Prefix ?? "--"}\n"
-                            + $"**Nadzór:** {config.Supervision.GetYesNo()}\n"
-                            + $"**Chaos:** {config.ChaosMode.GetYesNo()}\n"
-                            + $"**Admin:** {context.Guild.GetRole(config.AdminRole)?.Mention ?? "--"}\n"
-                            + $"**SemiAdmin:** {context.Guild.GetRole(config.SemiAdminRole)?.Mention ?? "--"}\n"
-                            + $"**Tester:** {context.Guild.GetRole(config.TesterRole)?.Mention ?? "--"}\n"
-                            + $"**User:** {context.Guild.GetRole(config.UserRole)?.Mention ?? "--"}\n"
-                            + $"**Mute:** {context.Guild.GetRole(config.MuteRole)?.Mention ?? "--"}\n"
-                            + $"**ModMute:** {context.Guild.GetRole(config.ModMuteRole)?.Mention ?? "--"}\n"
-                            + $"**Emote:** {context.Guild.GetRole(config.GlobalEmotesRole)?.Mention ?? "--"}\n"
-                            + $"**Nitro:** {context.Guild.GetRole(config.NitroRole)?.Mention ?? "--"}\n"
-                            + $"**Waifu:** {context.Guild.GetRole(config.WaifuRole)?.Mention ?? "--"}\n\n"
-
-                            + $"**W Market:** {context.Guild.GetTextChannel(config.WaifuConfig?.MarketChannel ?? 0)?.Mention ?? "--"}\n"
-                            + $"**W Spawn:** {context.Guild.GetTextChannel(config.WaifuConfig?.SpawnChannel ?? 0)?.Mention ?? "--"}\n"
-                            + $"**W Duel:** {context.Guild.GetTextChannel(config.WaifuConfig?.DuelChannel ?? 0)?.Mention ?? "--"}\n"
-                            + $"**W Trash Fight:** {context.Guild.GetTextChannel(config.WaifuConfig?.TrashFightChannel ?? 0)?.Mention ?? "--"}\n"
-                            + $"**W Trash Spawn:** {context.Guild.GetTextChannel(config.WaifuConfig?.TrashSpawnChannel ?? 0)?.Mention ?? "--"}\n"
-                            + $"**W Trash Cmd:** {context.Guild.GetTextChannel(config.WaifuConfig?.TrashCommandsChannel ?? 0)?.Mention ?? "--"}\n"
-                            + $"**Powiadomienia:** {context.Guild.GetTextChannel(config.NotificationChannel)?.Mention ?? "--"}\n"
-                            + $"**Przywitalnia:** {context.Guild.GetTextChannel(config.GreetingChannel)?.Mention ?? "--"}\n"
-                            + $"**Raport:** {context.Guild.GetTextChannel(config.RaportChannel)?.Mention ?? "--"}\n"
-                            + $"**Todos:** {context.Guild.GetTextChannel(config.ToDoChannel)?.Mention ?? "--"}\n"
-                            + $"**Quiz:** {context.Guild.GetTextChannel(config.QuizChannel)?.Mention ?? "--"}\n"
-                            + $"**Nsfw:** {context.Guild.GetTextChannel(config.NsfwChannel)?.Mention ?? "--"}\n"
-                            + $"**Log:** {context.Guild.GetTextChannel(config.LogChannel)?.Mention ?? "--"}\n\n"
-
-                            + $"**W Cmd**: {wcmd}\n"
-                            + $"**W Fight**: {wfCh}\n"
-                            + $"**Role modów**: {mods}\n"
-                            + $"**Bez zliczania**: {wCnt}\n"
-                            + $"**Bez exp**: {wExp}\n"
-                            + $"**Bez nadzoru**: {wSup}\n"
-                            + $"**Polecenia**: {cmdCh}\n"
-                            + $"**Role na lvl**: {roles}\n"
-                            + $"**AutoRole**: {selfRoles}\n"
-                            + $"**Krainy**: {lands}".TrimToLength()
-            };
+            return new EmbedBuilder { Color = EMType.Bot.Color() }
+                .AddField("Ogólne", general)
+                .AddField("Role", roles.TrimToLength(EmbedFieldBuilder.MaxFieldValueLength))
+                .AddField("Kanały", channels.TrimToLength(EmbedFieldBuilder.MaxFieldValueLength))
+                .AddField("Kanały gry", gameChannels.TrimToLength(EmbedFieldBuilder.MaxFieldValueLength))
+                .AddField("Listy", lists.TrimToLength(EmbedFieldBuilder.MaxFieldValueLength));
         }
 
         private EmbedBuilder GetSelfRolesConfig(GuildOptions config, SocketCommandContext context)
@@ -411,70 +383,61 @@ namespace Sanakan.Services
             }
         }
 
-        public async Task NotifyUserAsync(SocketGuildUser user, string reason)
+        public async Task NotifyUserAsync(SocketGuildUser user, string reason, long warnings)
         {
             try
             {
                 var dm = await user.CreateDMChannelAsync();
                 if (dm != null)
                 {
-                    await dm.SendMessageAsync($"Elo! Otrzymałeś ostrzeżenie o treści:\n {reason}\n\nPozdrawiam serdecznie!".TrimToLength());
+                    var embed = new EmbedBuilder
+                    {
+                        Title = "⚠️ Elo! Dostałeś ostrzeżenie",
+                        Color = PenaltyFormat.WarningColor,
+                        Description = $"Na serwerze **{Format.Sanitize(user.Guild.Name)}**. {PenaltyFormat.WarningCount(warnings)}",
+                        Footer = new EmbedFooterBuilder().WithText("Pozdrawiam serdecznie!"),
+                    }
+                    .AddField("Powód", PenaltyFormat.Quote(PenaltyFormat.Reason(reason)).TrimToLength(1000));
+
+                    await dm.SendMessageAsync("", embed: embed.Build());
                     await dm.CloseAsync();
                 }
             }
+            catch (Exception ex) when (Helper.IsDmClosed(ex))
+            {
+                _logger.Log($"Mod: warning DM: u{user.Id} has closed DMs");
+            }
             catch (Exception ex)
             {
-                _logger.LogError($"in notify: {ex}");
+                _logger.LogError($"Mod: warning DM: {ex}");
             }
         }
 
         public async Task NotifyAboutPenaltyAsync(SocketGuildUser user, ITextChannel channel,
-            ExtendedPenaltyInfo exInfo, string byWho = "automat")
+            ExtendedPenaltyInfo exInfo, string byWho = AutoAuthor)
         {
+            var automatic = byWho == AutoAuthor;
+            var info = exInfo.Info;
+            var reason = PenaltyFormat.Reason(info.Reason);
+            var total = PenaltyFormat.Duration(info.DurationInHours);
+            var end = PenaltyFormat.End(info);
+
+            var duration = total;
+            if (exInfo.IsBonusDuration())
+                duration += $"\n({PenaltyFormat.Duration(exInfo.BaseDuration)} + {PenaltyFormat.Duration(exInfo.BonusDuration)} dodatku)";
+
             var embed = new EmbedBuilder
             {
-                Color = exInfo.GetColor(),
-                Footer = new EmbedFooterBuilder().WithText($"Przez: {byWho}"),
-                Description = $"Powód: {exInfo.Info.Reason}".TrimToLength(2500),
+                Title = PenaltyFormat.Title(info.Type, automatic),
+                Color = PenaltyFormat.GetColor(info.Type),
                 Author = new EmbedAuthorBuilder().WithUser(user),
-                Fields = new List<EmbedFieldBuilder>
-                {
-                    new EmbedFieldBuilder
-                    {
-                        IsInline = true,
-                        Name = "UserId:",
-                        Value = $"{user.Id}",
-                    },
-                    new EmbedFieldBuilder
-                    {
-                        IsInline = true,
-                        Name = "Typ:",
-                        Value = exInfo.Info.Type,
-                    },
-                    new EmbedFieldBuilder
-                    {
-                        IsInline = true,
-                        Name = "Kiedy:",
-                        Value = $"{exInfo.GetTimeAsString()}"
-                    },
-                    new EmbedFieldBuilder
-                    {
-                        IsInline = true,
-                        Name = "Na ile:",
-                        Value = $"{exInfo.GetTotalDurationAsString()}",
-                    }
-                }
-            };
-
-            if (exInfo.IsBonusDuration())
-            {
-                embed.AddField(new EmbedFieldBuilder
-                    {
-                        IsInline = true,
-                        Name = "Bonus:",
-                        Value = $"{exInfo.GetBonusDurationAsString()}",
-                    });
+                Description = $"**Powód:** {reason}".TrimToLength(2500),
+                Footer = new EmbedFooterBuilder().WithText(PenaltyFormat.Footer(byWho, automatic)),
+                Timestamp = new DateTimeOffset(info.StartDate),
             }
+            .AddField("Użytkownik", PenaltyFormat.User(user), true)
+            .AddField("Czas", duration, true)
+            .AddField("Koniec", $"{PenaltyFormat.Timestamp(end, 'f')}\n{PenaltyFormat.Timestamp(end, 'R')}", true);
 
             if (channel != null)
                 await channel.SendMessageAsync("", embed: embed.Build());
@@ -484,42 +447,87 @@ namespace Sanakan.Services
                 var dm = await user.CreateDMChannelAsync();
                 if (dm != null)
                 {
-                    await dm.SendMessageAsync($"Elo! Zostałeś ukarany mutem na {exInfo.GetTotalDurationAsString()}.\n\nPodany powód: {exInfo.Info.Reason}\n\nPozdrawiam serdecznie!".TrimToLength());
+                    var dmEmbed = new EmbedBuilder
+                    {
+                        Title = PenaltyFormat.DmTitle(info.Type),
+                        Color = PenaltyFormat.GetColor(info.Type),
+                        Description = $"Na serwerze **{Format.Sanitize(user.Guild.Name)}** na **{total}**.",
+                        Footer = new EmbedFooterBuilder().WithText("Pozdrawiam serdecznie!"),
+                    }
+                    .AddField("Powód", PenaltyFormat.Quote(reason).TrimToLength(1000))
+                    .AddField("Koniec", $"{PenaltyFormat.Timestamp(end, 'f')} ({PenaltyFormat.Timestamp(end, 'R')})");
+
+                    await dm.SendMessageAsync("", embed: dmEmbed.Build());
                     await dm.CloseAsync();
                 }
             }
+            catch (Exception ex) when (Helper.IsDmClosed(ex))
+            {
+                _logger.Log($"Mod: penalty DM: u{user.Id} has closed DMs");
+            }
             catch (Exception ex)
             {
-                _logger.LogError($"in mute: {ex}");
+                _logger.LogError($"Mod: penalty DM: {ex}");
             }
         }
 
         public async Task<Embed> GetMutedListAsync(Database.DatabaseContext db, SocketCommandContext context)
         {
-            string mutedList = "Brak";
-
-            var list = (await db.Penalties.Include(x => x.Roles).FromCacheAsync(new string[] { CacheTags.Mute })).Where(x => x.Guild == context.Guild.Id && x.Type == PenaltyType.Mute);
-            if (list.Count() > 0)
-            {
-                mutedList = "";
-                foreach (var penalty in list)
-                {
-                    var endDate = penalty.StartDate.AddHours(penalty.DurationInHours);
-                    var name = context.Guild.GetUser(penalty.User)?.Mention;
-                    if (name is null) continue;
-
-                    mutedList += $"{name} [DO: {endDate.ToShortDateString()} {endDate.ToShortTimeString()}] - {penalty.Reason}\n";
-                }
-            }
+            var entries = (await db.GetCachedFullPenalties())
+                .Where(x => x.Guild == context.Guild.Id && x.Type == PenaltyType.Mute && context.Guild.GetUser(x.User) != null)
+                .OrderBy(PenaltyFormat.End)
+                .Select(PenaltyFormat.MutedEntry)
+                .ToList();
 
             return new EmbedBuilder
             {
-                Description = $"**Wyciszeni**:\n\n{mutedList.TrimToLength()}",
-                Color = EMType.Bot.Color(),
+                Title = $"🔇 Wyciszeni: {entries.Count}",
+                Description = entries.Count == 0 ? "Brak" : JoinWithinLimit(entries, 3900, maxEntries: MaxMutedShown),
+                Color = PenaltyFormat.MuteColor,
             }.Build();
         }
 
-        public Embed BuildTodo(IMessage message, SocketGuildUser who)
+        // each entry has a mention, a timestamp, a quote and maybe an emoji; Discord stops formatting after ~100 elements
+        public const int MaxMutedShown = 20;
+
+        public static string JoinWithinLimit(IReadOnlyList<string> entries, int limit, string entrySeparator = "\n\n", int maxEntries = int.MaxValue)
+        {
+            const int tailReserve = 30;
+            var text = new StringBuilder();
+            for (var i = 0; i < entries.Count; i++)
+            {
+                var separator = text.Length > 0 ? entrySeparator : "";
+                if (i >= maxEntries || text.Length + separator.Length + entries[i].Length + tailReserve > limit)
+                {
+                    text.Append($"{separator}…i jeszcze {entries.Count - i}");
+                    break;
+                }
+
+                text.Append(separator).Append(entries[i]);
+            }
+            return text.ToString();
+        }
+
+        public Embed BuildTodo(IMessage message, SocketGuildUser who, ulong targetGuildId, DateTimeOffset now)
+        {
+            var embed = BuildForwarded(message, who, "📌 Todo", "Dodał")
+                .AddField("Kanał", ChannelReference(message.Channel, targetGuildId), true)
+                .AddField("Napisano", $"<t:{message.CreatedAt.ToUnixTimeSeconds()}:f>", true);
+
+            embed.Timestamp = now;
+            return embed.Build();
+        }
+
+        public Embed BuildQuote(IMessage message, SocketGuildUser who)
+            => BuildForwarded(message, who, $"💬 Cytat z #{message.Channel.Name}", "Przesłał").Build();
+
+        // a channel mention from another server shows up as "#unknown"
+        public static string ChannelReference(IChannel channel, ulong targetGuildId)
+            => channel is IGuildChannel guildChannel && guildChannel.GuildId != targetGuildId
+                ? $"#{channel.Name} ({guildChannel.Guild?.Name})"
+                : $"<#{channel.Id}>";
+
+        private EmbedBuilder BuildForwarded(IMessage message, SocketGuildUser who, string title, string byLabel)
         {
             string image = "";
             if (message.Attachments.Count > 0)
@@ -530,18 +538,24 @@ namespace Sanakan.Services
                     image = first.Url;
             }
 
+            var description = message.Content.TrimToLength();
+            if (string.IsNullOrWhiteSpace(description) && string.IsNullOrEmpty(image))
+                description = "*sam załącznik*";
+
             return new EmbedBuilder
             {
+                Title = title.TrimToLength(EmbedBuilder.MaxTitleLength),
+                Url = message.GetJumpUrl(),
                 Author = new EmbedAuthorBuilder().WithUser(message.Author),
-                Description = message.Content.TrimToLength(),
+                Description = description,
                 Color = EMType.Bot.Color(),
                 ImageUrl = image,
                 Footer = new EmbedFooterBuilder
                 {
                     IconUrl = who.GetUserOrDefaultAvatarUrl(),
-                    Text = $"Przez: {who.GetUserNickInGuild()}",
+                    Text = $"{byLabel}: {who.GetUserNickInGuild()}",
                 },
-            }.Build();
+            };
         }
 
         public async Task UnmuteUserAsync(SocketGuildUser user, SocketRole muteRole, SocketRole muteModRole, Database.DatabaseContext db)
@@ -562,7 +576,7 @@ namespace Sanakan.Services
 
             await db.SaveChangesAsync();
 
-            QueryCacheManager.ExpireTag(new string[] { CacheTags.Mute });
+            QueryCache.ExpireTag(new string[] { CacheTags.Mute });
         }
 
         private async Task MuteUserGuildAsync(SocketGuildUser user, SocketRole muteRole, IEnumerable<OwnedRole> roles, SocketRole modMuteRole = null)
@@ -644,7 +658,7 @@ namespace Sanakan.Services
 
             await db.SaveChangesAsync();
 
-            QueryCacheManager.ExpireTag(new string[] { CacheTags.Mute });
+            QueryCache.ExpireTag(new string[] { CacheTags.Mute });
 
             await user.Guild.AddBanAsync(user, 0, exInfo.Info.Reason);
         }
@@ -738,7 +752,7 @@ namespace Sanakan.Services
 
             await db.SaveChangesAsync();
 
-            QueryCacheManager.ExpireTag(new string[] { CacheTags.Mute });
+            QueryCache.ExpireTag(new string[] { CacheTags.Mute });
 
             return exInfo;
         }

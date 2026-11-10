@@ -1,16 +1,18 @@
 ﻿#pragma warning disable 1591
 
 using Microsoft.EntityFrameworkCore;
-using Microsoft.Extensions.Caching.Memory;
 using Pomelo.EntityFrameworkCore.MySql.Infrastructure;
 using Sanakan.Config;
 using Sanakan.Database.Models;
 using Sanakan.Database.Models.Analytics;
 using Sanakan.Database.Models.Configuration;
 using Sanakan.Database.Models.Management;
+using Microsoft.Data.Sqlite;
 using System;
 using System.Collections.Generic;
-using Z.EntityFramework.Plus;
+using System.Data.Common;
+using System.Linq;
+using System.Threading.Tasks;
 
 namespace Sanakan.Database
 {
@@ -23,6 +25,9 @@ namespace Sanakan.Database
 
         // Tagi cache wyliczone przed zapisem, unieważniane po commicie (używa CacheActivity).
         public List<string> PendingCacheTags { get; set; }
+
+        // decks whose stored power is refreshed after the save (used by PowerActivity)
+        public HashSet<ulong> PendingPowerDecks { get; set; }
 
         public DatabaseContext(IConfig config) : base()
         {
@@ -42,8 +47,6 @@ namespace Sanakan.Database
         public DbSet<BoosterPackCharacter> BoosterPackCharacters { get; set; }
         public DbSet<WishlistObject> Wishes { get; set; }
         public DbSet<Figure> Figures { get; set; }
-        public DbSet<Question> Questions { get; set; }
-        public DbSet<Answer> Answers { get; set; }
         public DbSet<RarityExcluded> RaritysExcludedFromPacks { get; set; }
         public DbSet<SelfRole> SelfRoles { get; set; }
         public DbSet<GuildOptions> Guilds { get; set; }
@@ -70,17 +73,37 @@ namespace Sanakan.Database
         public DbSet<TagCardRelation> TagCardRelations { get; set; }
         public DbSet<Tag> Tags { get; set; }
         public DbSet<UserApiKey> UserApiKeys { get; set; }
+        public DbSet<IdempotencyRecord> IdempotencyRecords { get; set; }
 
         protected override void OnConfiguring(DbContextOptionsBuilder optionsBuilder)
         {
-            QueryCacheManager.DefaultMemoryCacheEntryOptions = new MemoryCacheEntryOptions()
-            {
-                SlidingExpiration = TimeSpan.FromMinutes(60),
-                AbsoluteExpirationRelativeToNow  = TimeSpan.FromHours(12)
-            };
-            optionsBuilder.UseMySql(_config.Get().ConnectionString,
-                new MySqlServerVersion(new System.Version(8, 0, 43)), opt => opt.EnableRetryOnFailure())
-                .AddInterceptors(DbActivity.Commands, DbActivity.Saves, CacheActivity.Interceptor);
+            var config = _config.Get();
+            var builder = config.DatabaseProvider == global::Sanakan.Config.Model.DatabaseProvider.Sqlite
+                ? optionsBuilder.UseSqlite(config.ConnectionString)
+                : optionsBuilder.UseMySql(config.ConnectionString,
+                    new MySqlServerVersion(new System.Version(8, 0, 43)), opt => opt.EnableRetryOnFailure());
+
+            builder.AddInterceptors(DbActivity.Commands, DbActivity.Saves, PowerActivity.Interceptor, CacheActivity.Interceptor);
+            if (config.DatabaseProvider == global::Sanakan.Config.Model.DatabaseProvider.Sqlite)
+                builder.AddInterceptors(SqliteText.Interceptor);
+        }
+
+        public static async Task TestConnectionAsync(global::Sanakan.Config.Model.DatabaseProvider provider, string connectionString)
+        {
+            // ReadWrite: a mistyped SQLite path must fail instead of creating an empty database
+            await using DbConnection connection = provider == global::Sanakan.Config.Model.DatabaseProvider.Sqlite
+                ? new SqliteConnection(new SqliteConnectionStringBuilder(connectionString) { Mode = SqliteOpenMode.ReadWrite }.ToString())
+                : new MySqlConnector.MySqlConnection(connectionString);
+            await connection.OpenAsync();
+        }
+
+        public void EnsureReady()
+        {
+            Database.EnsureCreated();
+
+            // WAL lets reads run while a write is in progress; the mode is stored in the database file
+            if (Database.IsSqlite())
+                Database.ExecuteSqlRaw("PRAGMA journal_mode=WAL;");
         }
 
         protected override void OnModelCreating(ModelBuilder modelBuilder)
@@ -88,23 +111,15 @@ namespace Sanakan.Database
             base.OnModelCreating(modelBuilder);
 
             // User
-            modelBuilder.Entity<Question>(entity =>
-            {
-                entity.HasKey(e => e.Id);
-            });
-
-            modelBuilder.Entity<Answer>(entity =>
-            {
-                entity.HasKey(e => e.Id);
-
-                entity.HasOne(e => e.Question)
-                    .WithMany(u => u.Answers);
-            });
-
             modelBuilder.Entity<User>(entity =>
             {
                 entity.HasKey(e => e.Id);
                 entity.HasIndex(e => e.Shinden);
+                entity.HasIndex(e => e.ExpCnt);
+                entity.HasIndex(e => e.ScCnt);
+                entity.HasIndex(e => e.TcCnt);
+                entity.HasIndex(e => e.AcCnt);
+                entity.HasIndex(e => e.MessagesCnt);
             });
 
             modelBuilder.Entity<UserStats>(entity =>
@@ -127,6 +142,8 @@ namespace Sanakan.Database
             {
                 entity.HasKey(e => e.Id);
                 entity.HasIndex(e => e.Guild);
+                entity.HasIndex(e => e.Type);
+                entity.HasIndex(e => e.BValue);
 
                 entity.HasOne(e => e.User)
                     .WithMany(u => u.TimeStatuses);
@@ -136,6 +153,8 @@ namespace Sanakan.Database
             {
                 entity.HasKey(e => e.Id);
                 entity.HasIndex(e => e.DeckPower);
+                entity.HasIndex(e => e.CardsInDeck);
+                entity.HasIndex(e => e.WishlistIsPrivate);
 
                 entity.HasOne(e => e.User)
                     .WithOne(u => u.GameDeck);
@@ -171,6 +190,12 @@ namespace Sanakan.Database
                 entity.HasKey(e => e.Id);
                 entity.HasIndex(e => e.Active);
                 entity.HasIndex(e => e.Character);
+                entity.HasIndex(e => e.FromFigure);
+                entity.HasIndex(e => e.Unique);
+                entity.HasIndex(e => e.CardPower);
+                entity.HasIndex(e => e.Affection);
+                entity.HasIndex(e => e.Dere);
+                entity.HasIndex(e => e.Health);
 
                 entity.HasOne(e => e.GameDeck)
                     .WithMany(d => d.Cards);
@@ -210,6 +235,7 @@ namespace Sanakan.Database
             modelBuilder.Entity<BoosterPack>(entity =>
             {
                 entity.HasKey(e => e.Id);
+                entity.Property(e => e.Season).HasMaxLength(32);
 
                 entity.HasOne(e => e.GameDeck)
                     .WithMany(d => d.BoosterPacks);
@@ -400,6 +426,7 @@ namespace Sanakan.Database
             modelBuilder.Entity<WishlistCount>(entity =>
             {
                 entity.HasKey(e => e.Id);
+                entity.HasIndex(e => e.Count).HasDatabaseName("KCCount");
             });
 
             modelBuilder.Entity<UserActivity>(entity =>
@@ -421,6 +448,22 @@ namespace Sanakan.Database
                     .HasForeignKey(e => e.UserId)
                     .OnDelete(DeleteBehavior.Cascade);
             });
+
+            modelBuilder.Entity<IdempotencyRecord>(entity =>
+            {
+                entity.HasKey(e => e.Id);
+                entity.Property(e => e.Scope).HasMaxLength(32).IsRequired();
+                entity.Property(e => e.Key).HasMaxLength(64).IsRequired();
+                entity.Property(e => e.RequestHash).HasMaxLength(64).IsRequired();
+                entity.HasIndex(e => new { e.Scope, e.Key }).IsUnique();
+                entity.HasIndex(e => e.CreatedAt);
+            });
+
+            if (Database.IsSqlite())
+            {
+                foreach (var property in modelBuilder.Model.GetEntityTypes().SelectMany(x => x.GetProperties()).Where(x => x.ClrType == typeof(string)))
+                    property.SetCollation(SqliteText.Collation);
+            }
         }
     }
 }

@@ -3,8 +3,8 @@
 using Discord;
 using Discord.Net;
 using Discord.Rest;
+using Microsoft.Extensions.Logging;
 using Sanakan.Config;
-using Shinden.Logger;
 using System;
 using System.Collections.Generic;
 using System.Linq;
@@ -28,22 +28,7 @@ namespace Sanakan.Services
         private const string ColorDefault = "\u001b[0m";
         private const string ColorRed = "\u001b[0;31m";
         private const string ColorYellow = "\u001b[0;33m";
-
-        private static readonly string[] _routinePrefixes =
-        {
-            "Executor: running ",
-            "Executor: completed ",
-            "Run cmd: ",
-            "mem usage: ",
-            "Reconnected!",
-            // Shinden.NET
-            "Processing request: ",
-            "Request successful.",
-            "Parsing response.",
-            "Response code: ",
-            "Response body: ",
-            "Request body: ",
-        };
+        private const string ColorReport = "\u001b[1;36m";
 
         private readonly ConsoleLogger _console;
         private readonly IConfig _config;
@@ -53,6 +38,7 @@ namespace Sanakan.Services
 
         private readonly object _lock = new object();
         private readonly Queue<string> _pending = new Queue<string>();
+        private readonly ErrorPingLimiter _errorPing = new ErrorPingLimiter();
         private int _dropped = 0;
 
         private ITextChannel _channel;
@@ -68,7 +54,7 @@ namespace Sanakan.Services
             Shinden = new ShindenLogger(this);
         }
 
-        public ILogger Shinden { get; }
+        public ILogger<ShindenAPI.Shinden> Shinden { get; }
 
         public void Log(string message) => Log(message, false);
 
@@ -79,13 +65,15 @@ namespace Sanakan.Services
             if (!IsEnabled() || !ShouldSend(message))
                 return;
 
-            var isError = message.StartsWith(LoggerExtensions.ErrorPrefix, StringComparison.Ordinal);
-            var text = isError ? message.Substring(LoggerExtensions.ErrorPrefix.Length) : message;
-            var entry = $"[{DateTime.Now:HH:mm:ss}] {(isError ? "ERROR " : "")}{_console.MaskSecrets(text)}";
-            entry = PrefixLines(entry, isError ? ColorRed : fromShinden ? ColorYellow : ColorDefault);
+            if (LoggerExtensions.Parse(message).Kind == LogKind.Error)
+                _errorPing.Record(DateTime.Now);
+
+            var entries = Format(_console.MaskSecrets(message), fromShinden, DateTime.Now);
             lock (_lock)
             {
-                _pending.Enqueue(entry);
+                foreach (var entry in entries)
+                    _pending.Enqueue(entry);
+
                 while (_pending.Count > MaxPending)
                 {
                     _pending.Dequeue();
@@ -94,12 +82,54 @@ namespace Sanakan.Services
             }
         }
 
+        public static List<string> Format(string message, bool fromShinden, DateTime now)
+        {
+            var (kind, text) = LoggerExtensions.Parse(message);
+            var isError = kind == LogKind.Error;
+            var isReport = kind == LogKind.Report;
+            var label = isReport ? "📊 REPORT " : LoggerExtensions.Label(kind);
+
+            var entry = PrefixLines($"[{now:HH:mm:ss}] {label}{text}",
+                isError ? ColorRed : isReport ? ColorReport : fromShinden ? ColorYellow : ColorDefault);
+
+            // a long report is split between messages instead of being cut off
+            return isReport ? SplitByLines(entry, BodyLimit) : new List<string> { entry };
+        }
+
+        private static int BodyLimit => MaxMessageLength - BlockStart.Length - BlockEnd.Length;
+
+        private static List<string> SplitByLines(string entry, int limit)
+        {
+            var parts = new List<string>();
+            var part = new StringBuilder();
+            foreach (var line in entry.Split('\n'))
+            {
+                if (part.Length > 0 && part.Length + 1 + line.Length > limit)
+                {
+                    parts.Add(part.ToString());
+                    part.Clear();
+                }
+
+                if (part.Length > 0)
+                    part.Append('\n');
+                part.Append(line);
+            }
+
+            if (part.Length > 0)
+                parts.Add(part.ToString());
+            return parts;
+        }
+
+        private static bool IsReport(string entry) => entry.StartsWith(ColorReport, StringComparison.Ordinal);
+
         private static string PrefixLines(string entry, string prefix)
             => string.Join("\n", entry.Replace("\r", "").Split('\n').Select(x => prefix + x));
 
         public static bool ShouldSend(string message)
-            => !string.IsNullOrWhiteSpace(message)
-                && !_routinePrefixes.Any(x => message.StartsWith(x, StringComparison.Ordinal));
+        {
+            var (kind, text) = LoggerExtensions.Parse(message);
+            return kind != LogKind.Routine && !string.IsNullOrWhiteSpace(text);
+        }
 
         public async Task FlushAllAsync(TimeSpan timeout)
         {
@@ -147,6 +177,7 @@ namespace Sanakan.Services
             var bodyLimit = maxLength - BlockStart.Length - BlockEnd.Length;
             var messages = new List<string>();
             var body = new StringBuilder();
+            var bodyIsReport = false;
 
             if (!string.IsNullOrEmpty(header))
                 body.Append(Sanitize(header, bodyLimit));
@@ -154,8 +185,10 @@ namespace Sanakan.Services
             while (messages.Count < maxMessages && pending.Count > 0)
             {
                 var line = Sanitize(pending.Peek(), bodyLimit);
+                var lineIsReport = IsReport(line);
+                // reports never share a message with ordinary logs, so they are easy to spot
                 var needed = body.Length == 0 ? line.Length : body.Length + 1 + line.Length;
-                if (needed > bodyLimit)
+                if (body.Length > 0 && (needed > bodyLimit || lineIsReport != bodyIsReport))
                 {
                     messages.Add(BlockStart + body + BlockEnd);
                     body.Clear();
@@ -166,6 +199,7 @@ namespace Sanakan.Services
                     body.Append('\n');
 
                 body.Append(line);
+                bodyIsReport = lineIsReport;
                 pending.Dequeue();
             }
 
@@ -226,20 +260,33 @@ namespace Sanakan.Services
             List<string> messages;
             lock (_lock)
             {
-                var header = _dropped > 0 ? $"[pominięto {_dropped} wpisów - zbyt dużo logów]" : null;
+                var header = _dropped > 0 ? $"[skipped {_dropped} entries - too many logs]" : null;
                 _dropped = 0;
                 messages = Pack(_pending, header, MaxMessagesPerFlush);
             }
-
-            if (messages.Count == 0)
-                return false;
 
             var options = new RequestOptions { CancelToken = token };
             foreach (var msg in messages)
                 await channel.SendMessageAsync(msg, allowedMentions: AllowedMentions.None, options: options).ConfigureAwait(false);
 
-            return true;
+            // also checked without new logs, so a ping held back during an error flood still goes out later
+            await PingAboutErrorsAsync(channel, options).ConfigureAwait(false);
+            return messages.Count > 0;
         }
+
+        private async Task PingAboutErrorsAsync(ITextChannel channel, RequestOptions options)
+        {
+            var roleId = _config.Get().LogChannel?.ErrorRoleId ?? 0;
+            if (roleId == 0 || !_errorPing.TryTake(DateTime.Now, out var errors, out var flood))
+                return;
+
+            var mentions = new AllowedMentions { RoleIds = new List<ulong> { roleId } };
+            await channel.SendMessageAsync(ErrorPingText(roleId, errors, flood), allowedMentions: mentions, options: options).ConfigureAwait(false);
+        }
+
+        public static string ErrorPingText(ulong roleId, int errors, bool flood)
+            => $"<@&{roleId}> ⚠️ Errors in logs: {errors}"
+                + (flood ? $" (many errors, next ping in {ErrorPingLimiter.FloodPingInterval.TotalMinutes:0} min at the earliest)" : "");
 
         private async Task<ITextChannel> GetChannelAsync(CancellationToken token)
         {
@@ -270,7 +317,7 @@ namespace Sanakan.Services
                     _pending.Clear();
                     _dropped = 0;
                 }
-                _console.Log($"DiscordLog: brak dostępu do kanału {cfg.ChannelId} na serwerze {cfg.GuildId}, logi zostają tylko na konsoli.");
+                _console.Log($"DiscordLog: no access to channel {cfg.ChannelId} on guild {cfg.GuildId}, logs stay on the console only");
                 return null;
             }
 
@@ -278,17 +325,32 @@ namespace Sanakan.Services
             return channel;
         }
 
-        private class ShindenLogger : ILogger
+        private class ShindenLogger : ILogger<ShindenAPI.Shinden>
         {
             private readonly DiscordChannelLogger _parent;
 
             public ShindenLogger(DiscordChannelLogger parent) => _parent = parent;
 
-            public void Log(string message)
+            public IDisposable BeginScope<TState>(TState state) where TState : notnull => null;
+
+            public bool IsEnabled(LogLevel logLevel) => logLevel >= LogLevel.Information && logLevel != LogLevel.None;
+
+            public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception exception, Func<TState, Exception, string> formatter)
             {
-                ShindenActivity.Default.Track(message);
-                _parent.Log(message, true);
+                if (!IsEnabled(logLevel))
+                    return;
+
+                var message = $"Shinden: {formatter(state, exception)}";
+                // missing users or titles are routine, the library still reports them as errors
+                if (logLevel < LogLevel.Warning || IsNotFound(state))
+                    _parent._console.Log(message);
+                else
+                    _parent.Log(message, true);
             }
+
+            private static bool IsNotFound<TState>(TState state)
+                => state is IEnumerable<KeyValuePair<string, object>> values
+                    && values.Any(x => x.Key == "code" && x.Value is int code && code == 404);
         }
     }
 }

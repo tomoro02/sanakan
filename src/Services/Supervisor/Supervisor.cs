@@ -14,7 +14,6 @@ using Sanakan.Config;
 using Sanakan.Extensions;
 using Sanakan.Services.ScamImages;
 using Sanakan.Services.Time;
-using Shinden.Logger;
 
 namespace Sanakan.Services.Supervisor
 {
@@ -41,7 +40,6 @@ namespace Sanakan.Services.Supervisor
         };
 
         private AsyncNonKeyedLocker _semaphore = new AsyncNonKeyedLocker(1);
-        private AsyncNonKeyedLocker _semaphoreJoin = new AsyncNonKeyedLocker(1);
         private AsyncKeyedLocker<ulong> _semaphoreUser = new AsyncKeyedLocker<ulong>(x =>
         {
             x.PoolSize = 200;
@@ -49,7 +47,6 @@ namespace Sanakan.Services.Supervisor
             x.MaxCount = 1;
         });
         private Dictionary<ulong, Dictionary<ulong, SupervisorEntity>> _guilds;
-        private Dictionary<ulong, Dictionary<string, SupervisorJoinEntity>> _guildsJoin;
         private Dictionary<ulong, HashSet<ulong>> _temporarySupervisionChannels;
 
         private DiscordSocketClient _client;
@@ -71,7 +68,6 @@ namespace Sanakan.Services.Supervisor
             _scamImages = scamImages;
 
             _guilds = new Dictionary<ulong, Dictionary<ulong, SupervisorEntity>>();
-            _guildsJoin = new Dictionary<ulong, Dictionary<string, SupervisorJoinEntity>>();
             _temporarySupervisionChannels = new Dictionary<ulong, HashSet<ulong>>();
 
             _timer = new Timer(async _ =>
@@ -79,7 +75,6 @@ namespace Sanakan.Services.Supervisor
                 try
                 {
                     using (await _semaphore.LockAsync().ConfigureAwait(false))
-                    using (await _semaphoreJoin.LockAsync().ConfigureAwait(false))
                     {
                         AutoValidate();
                     }
@@ -93,7 +88,6 @@ namespace Sanakan.Services.Supervisor
             TimeSpan.FromMinutes(5),
             TimeSpan.FromMinutes(5));
             _client.MessageReceived += HandleMessageAsync;
-            _client.UserJoined += UserJoinedAsync;
         }
 
         private async Task HandleMessageAsync(SocketMessage message)
@@ -177,19 +171,26 @@ namespace Sanakan.Services.Supervisor
                         channels.Add(message.Channel.Id);
                     }
 
-                    await message.Channel.SendMessageAsync("Nadzór został tymczasowo aktywowany na tym kanale (do restartu bota).");
+                    await message.Channel.SendMessageAsync("", embed: SupervisionStatus(true, true));
                     return true;
                 }
 
                 var isTemporary = await IsTemporarySupervisionActiveAsync(user.Guild.Id, message.Channel.Id);
                 var isActive = !isBlacklisted && (isTemporary ||
                     (gConfig.Supervision && !gConfig.ChannelsWithoutSupervision.Any(x => x.Channel == message.Channel.Id)));
-                var status = isActive ? "aktywny" : "nieaktywny";
-
-                await message.Channel.SendMessageAsync($"Nadzór na tym kanale jest {status}.");
+                await message.Channel.SendMessageAsync("", embed: SupervisionStatus(isActive, false));
                 return true;
             }
         }
+
+        public static Embed SupervisionStatus(bool active, bool temporarilyEnabled)
+            => new EmbedBuilder
+            {
+                Color = active ? new Color(59, 165, 93) : new Color(128, 132, 142),
+                Description = temporarilyEnabled
+                    ? "🛡️ Nadzór został tymczasowo włączony na tym kanale, do restartu bota."
+                    : $"🛡️ Nadzór na tym kanale jest **{(active ? "aktywny" : "nieaktywny")}**.",
+            }.Build();
 
         private async Task<bool> IsTemporarySupervisionActiveAsync(ulong guildId, ulong channelId)
         {
@@ -209,6 +210,7 @@ namespace Sanakan.Services.Supervisor
             bool deleteMessage = false;
             bool sendImageScamWarning = false;
             string penaltyReason = null;
+            string imagePenaltyReason = null;
             var hasTooManyImages = HasMoreThanThreeImages(message) && !IsImageSpamExempt(message);
 
             using (var db = new Database.DatabaseContext(_config))
@@ -272,11 +274,11 @@ namespace Sanakan.Services.Supervisor
                 if (gConfig.AdminRole != 0 && user.Roles.Any(x => x.Id == gConfig.AdminRole))
                     return;
 
-                if (!isTemporary && gConfig.ChannelsWithoutSupervision.Any(x => x.Channel == message.Channel.Id))
+                var isUnsupervisedChannel = !isTemporary && gConfig.ChannelsWithoutSupervision.Any(x => x.Channel == message.Channel.Id);
+                if (isUnsupervisedChannel && !message.Attachments.Any(IsImageAttachment))
                     return;
 
-                var scan = hasTooManyImages ? new ScamImageScanResult() : await ScanImagesAsync(message);
-                var hasScamImage = scan.Matches.Count > 0;
+                var scan = await ScanImagesAsync(message);
                 foreach (var scamMatch in scan.Matches)
                 {
                     _logger.Log($"ScamImage: hit msg={message.GetJumpUrl()} author={user.Id} url={scamMatch.Url} " +
@@ -304,47 +306,55 @@ namespace Sanakan.Services.Supervisor
                         guild[user.Id] = susspect;
                     }
 
-                    var trackedContent = string.IsNullOrEmpty(message.Content)
-                        ? $"attachment:{message.Id}"
-                        : messageContent;
-                    var thisMessage = susspect.Get(trackedContent);
-
                     bool hasRole = user.Roles.Any(x => x.Id == gConfig.UserRole || x.Id == gConfig.MuteRole) || gConfig.UserRole == 0;
-                    bool hasSuspiciousUrl = thisMessage.IsBannable();
+                    bool hasSuspiciousUrl = false;
                     bool hasNonWhitelistedUrl = false;
-                    if (_config.Get().GiveBanForUrlSpam)
+                    int specifiedMessages = 0;
+                    action = Action.None;
+
+                    if (!isUnsupervisedChannel)
                     {
-                        hasNonWhitelistedUrl = thisMessage.AnyUrl();
+                        var trackedContent = string.IsNullOrEmpty(message.Content)
+                            ? $"attachment:{message.Id}"
+                            : messageContent;
+                        var thisMessage = susspect.Get(trackedContent);
+
+                        hasSuspiciousUrl = thisMessage.IsBannable();
+                        if (_config.Get().GiveBanForUrlSpam)
+                        {
+                            hasNonWhitelistedUrl = thisMessage.AnyUrl();
+                        }
+
+                        bool isBannable = hasSuspiciousUrl || hasNonWhitelistedUrl;
+                        action = MakeDecision(messageContent, susspect.Inc(), thisMessage.Inc(), hasRole && !isBannable);
+                        specifiedMessages = thisMessage.Count;
                     }
 
-                    bool isBannable = hasSuspiciousUrl || hasNonWhitelistedUrl;
-                    action = MakeDecision(messageContent, susspect.Inc(), thisMessage.Inc(), hasRole && !isBannable);
-                    var imageSpamCount = 0;
-                    if (hasTooManyImages || hasScamImage)
-                    {
-                        deleteMessage = true;
-                        var hits = hasScamImage ? scan.Matches.Count : 1;
-                        imageSpamCount = susspect.IncImageSpam(hits);
-                        if (ShouldPunishImageSpam(imageSpamCount, hasScamImage))
-                            action = hasRole ? Action.Mute : Action.Ban;
-                        else
-                            sendImageScamWarning = imageSpamCount == hits;
-                    }
+                    var imageSpam = susspect.TrackImageSpam(hasTooManyImages, scan.Matches.Count);
+                    deleteMessage = imageSpam.ShouldDelete;
+                    if (imageSpam.ShouldPunish)
+                        action = ShouldMuteForImageSpam(hasRole, isUnsupervisedChannel) ? Action.Mute : Action.Ban;
+                    sendImageScamWarning = imageSpam.ShouldWarn && action != Action.Mute && action != Action.Ban;
 
                     if (action == Action.Mute || action == Action.Ban)
                     {
-                        penaltyReason = GetPenaltyReason(action, messageContent, hasSuspiciousUrl,
-                            hasNonWhitelistedUrl, imageSpamCount, susspect.TotalMessages, thisMessage.Count,
-                            hasScamImage && !hasTooManyImages);
+                        imagePenaltyReason = imageSpam.GetPenaltyReason(action == Action.Ban);
+                        penaltyReason = imagePenaltyReason ??
+                            GetPenaltyReason(action, messageContent, hasSuspiciousUrl,
+                                hasNonWhitelistedUrl, susspect.TotalMessages, specifiedMessages);
                     }
                 }
 
-                if (action == Action.Mute || action == Action.Ban)
+                if (deleteMessage || action == Action.Mute || action == Action.Ban)
                 {
                     foreach (var image in scan.Unmatched)
-                        _logger.Log($"ScamImage: unmatched image in penalized message msg={message.GetJumpUrl()} author={user.Id} " +
-                            $"action={action} url={image.Url} hash={ScamImageStore.FormatHash(image.Hash)}");
+                        _logger.Log($"ScamImage: unmatched image in moderated message msg={message.GetJumpUrl()} author={user.Id} " +
+                            $"action={action} deleted={deleteMessage} url={image.Url} hash={ScamImageStore.FormatHash(image.Hash)} " +
+                            $"closest={ScamImageStore.FormatHash(image.ClosestHash)} distance={image.Distance}");
                 }
+
+                if (imagePenaltyReason != null)
+                    _logger.Log($"ScamImage: {imagePenaltyReason} msg={message.GetJumpUrl()} author={user.Id}");
             }
 
             if (deleteMessage)
@@ -372,7 +382,8 @@ namespace Sanakan.Services.Supervisor
             {
                 case Action.Warn:
                     await message.Channel.SendMessageAsync("",
-                        embed: $"{user.Mention} zaraz przekroczysz granicę!".ToEmbedMessage(EMType.Bot).Build());
+                        embed: $"⚠️ {user.Mention} zwolnij, jeszcze trochę i dostaniesz wyciszenie za spam.".ToEmbedMessage()
+                            .WithColor(PenaltyFormat.WarningColor).Build());
                     break;
 
                 case Action.Mute:
@@ -407,15 +418,9 @@ namespace Sanakan.Services.Supervisor
         }
 
         private string GetPenaltyReason(Action action, string messageContent, bool hasSuspiciousUrl,
-            bool hasNonWhitelistedUrl, int imageSpamCount, int totalMessages, int specifiedMessages, bool scamImage)
+            bool hasNonWhitelistedUrl, int totalMessages, int specifiedMessages)
         {
             var penalty = action == Action.Ban ? "ban" : "mute";
-
-            if (imageSpamCount >= 2 && scamImage)
-                return $"Automatyczny {penalty}: scamowe obrazki - rozpoznano {imageSpamCount} scamowych obrazków w ciągu 2 minut.";
-
-            if (imageSpamCount >= 3)
-                return $"Automatyczny {penalty}: spam obrazkami - wysłano {imageSpamCount} wiadomości zawierających więcej niż trzy obrazki w ciągu 2 minut.";
 
             if (hasSuspiciousUrl)
                 return $"Automatyczny ban: wykryto podejrzany link lub wzorzec phishingowy. Adresy: {GetUrlsDescription(messageContent)}";
@@ -423,7 +428,8 @@ namespace Sanakan.Services.Supervisor
             if (hasNonWhitelistedUrl)
                 return $"Automatyczny ban: spam linkami - wykryto adres spoza listy zaufanych domen. Adresy: {GetUrlsDescription(messageContent)}";
 
-            return $"Automatyczny {penalty}: spam/flood - {specifiedMessages} powtórzeń tej samej treści, łącznie {totalMessages} wiadomości w krótkim czasie.";
+            return $"Automatyczny {penalty}: spam/flood - {specifiedMessages} {Polish.Plural(specifiedMessages, "powtórzenie", "powtórzenia", "powtórzeń")} "
+                + $"tej samej treści, łącznie {totalMessages} {Polish.Plural(totalMessages, "wiadomość", "wiadomości", "wiadomości")} w krótkim czasie.";
         }
 
         private string GetUrlsDescription(string content)
@@ -488,15 +494,17 @@ namespace Sanakan.Services.Supervisor
             return await _scamImages.ScanAsync(images);
         }
 
+        public static bool ShouldMuteForImageSpam(bool hasRole, bool isUnsupervisedChannel)
+        {
+            return hasRole || isUnsupervisedChannel;
+        }
+
         public static bool IsAlwaysBanProtected(bool isOwner, bool isAdministrator, ulong adminRole, ulong semiAdminRole,
             IEnumerable<ulong> userRoles, IEnumerable<ulong> moderatorRoles)
         {
             return isOwner || isAdministrator ||
                 IsAlwaysBanStaff(adminRole, semiAdminRole, userRoles, moderatorRoles);
         }
-
-        public static bool ShouldPunishImageSpam(int imageSpamCount, bool scamImage)
-            => imageSpamCount >= (scamImage ? 2 : 3);
 
         public static bool IsAlwaysBanStaff(ulong adminRole, ulong semiAdminRole, IEnumerable<ulong> userRoles,
             IEnumerable<ulong> moderatorRoles)
@@ -557,111 +565,10 @@ namespace Sanakan.Services.Supervisor
                     if (_guilds[guild.Key].Count == 0)
                         _guilds.Remove(guild.Key);
                 }
-
-                var toClean2 = new Dictionary<ulong, List<string>>();
-                foreach (var guild in _guildsJoin)
-                {
-                    var usrs = new List<string>();
-                    foreach (var susspect in guild.Value)
-                    {
-                        if (!susspect.Value.IsValid())
-                            usrs.Add(susspect.Key);
-                    }
-                    toClean2.Add(guild.Key, usrs);
-                }
-
-                foreach (var guild in toClean2)
-                {
-                    foreach (var nick in guild.Value)
-                        _guildsJoin[guild.Key].Remove(nick);
-
-                    if (_guildsJoin[guild.Key].Count == 0)
-                        _guildsJoin.Remove(guild.Key);
-                }
             }
             catch (Exception ex)
             {
-                _logger.LogError($"Supervisor: autovalidate error {ex}");
-            }
-        }
-
-        private async Task UserJoinedAsync(SocketGuildUser user)
-        {
-            if (!_config.Get().Supervision) return;
-
-            var usr = user as SocketGuildUser;
-            if (usr == null) return;
-
-            if (usr.IsBot || usr.IsWebhook) return;
-
-            if (_config.Get().BlacklistedGuilds.Any(x => x == user.Guild.Id))
-                return;
-
-            _ = Task.Run(async () =>
-            {
-                try
-                {
-                    using (await _semaphoreUser.LockAsync(usr.Id).ConfigureAwait(false))
-                    {
-                        await AnalizeJoin(usr);
-                    }
-                }
-                catch (Exception ex)
-                {
-                    _logger.LogError($"Supervisor: analize join: {ex}");
-                }
-            });
-
-            await Task.CompletedTask;
-        }
-
-        private async Task AnalizeJoin(SocketGuildUser user)
-        {
-            List<ulong> usersToBan = null;
-
-            using (var db = new Database.DatabaseContext(_config))
-            {
-                var gConfig = await db.GetCachedGuildFullConfigAsync(user.Guild.Id);
-                if (gConfig == null) return;
-
-                if (!gConfig.Supervision) return;
-
-                using (await _semaphoreJoin.LockAsync().ConfigureAwait(false))
-                {
-                    if (!_guildsJoin.Any(x => x.Key == user.Guild.Id))
-                        _guildsJoin.Add(user.Guild.Id, new Dictionary<string, SupervisorJoinEntity>());
-
-                    var guild = _guildsJoin[user.Guild.Id];
-                    if (!guild.Any(x => x.Key == user.Username))
-                        guild.Add(user.Username, new SupervisorJoinEntity(user.Id, _time));
-
-                    var susspect = guild[user.Username];
-                    if (!susspect.IsValid())
-                    {
-                        susspect = new SupervisorJoinEntity(user.Id, _time);
-                        guild[user.Username] = susspect;
-                    }
-
-                    susspect.Add(user.Id);
-                    if (susspect.IsBannable())
-                        usersToBan = susspect.GetUsersToBan();
-                }
-            }
-
-            if (usersToBan == null)
-                return;
-
-            foreach (var toBan in usersToBan)
-            {
-                try
-                {
-                    await user.Guild.AddBanAsync(toBan, 1,
-                        $"Automatyczny ban: raid - wykryto {usersToBan.Count} kont, które dołączyły w ciągu 2 minut z tą samą nazwą użytkownika ({user.Username}).");
-                }
-                catch (Exception ex)
-                {
-                    _logger.LogError($"Supervisor: raid ban {toBan}: {ex}");
-                }
+                _logger.LogError($"Supervisor: autovalidate: {ex}");
             }
         }
     }

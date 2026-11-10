@@ -16,8 +16,7 @@ using Sanakan.Preconditions;
 using Sanakan.Services;
 using Sanakan.Services.Commands;
 using Sanakan.Services.Time;
-using Shinden;
-using Z.EntityFramework.Plus;
+using Sanakan.ShindenCompat;
 
 namespace Sanakan.Modules
 {
@@ -92,7 +91,7 @@ namespace Sanakan.Modules
                     return;
                 }
 
-                await SafeReplyAsync("", embed: $"Usunięto {count} ostatnich wiadomości.".ToEmbedMessage(EMType.Bot).Build());
+                await SafeReplyAsync("", embed: $"Usunięto {Polish.Count(count, "ostatnią wiadomość", "ostatnie wiadomości", "ostatnich wiadomości")}.".ToEmbedMessage(EMType.Bot).Build());
             }
         }
 
@@ -106,7 +105,7 @@ namespace Sanakan.Modules
             if (Context.Channel is ITextChannel channel)
             {
                 var enumerable = await channel.GetMessagesAsync().FlattenAsync();
-                var userMessages = enumerable.Where(x => x.Author == user);
+                var userMessages = enumerable.Where(x => x.Author.Id == user.Id);
                 try
                 {
                     await channel.DeleteMessagesAsync(userMessages).ConfigureAwait(false);
@@ -143,10 +142,10 @@ namespace Sanakan.Modules
                 var info = _moderation.GetBanUserInfo(user, duration, reason);
                 await _moderation.NotifyAboutPenaltyAsync(user, notifChannel, info, $"{usr.GetUserNickInGuild()}");
                 await _moderation.BanUserAsync(user, info, db);
-            }
 
-            await SafeReplyAsync("", embed: $"{user.Mention} został zbanowany.".ToEmbedMessage(EMType.Success)
-                .WithImageUrl(Services.Fun.GetRandomMuteReactionGif()).Build());
+                await SafeReplyAsync("", embed: $"{user.Mention} został {PenaltyFormat.Applied(info)}.".ToEmbedMessage(EMType.Success)
+                    .WithImageUrl(Services.Fun.GetRandomMuteReactionGif()).Build());
+            }
         }
 
         [Command("mute modifier")]
@@ -163,7 +162,7 @@ namespace Sanakan.Modules
                 {
                     db.MuteModifiers.Remove(mod);
                     await db.SaveChangesAsync();
-                    await SafeReplyAsync("", embed: $"Wpis o użytkowniku {user.Mention} został skasowany.".ToEmbedMessage(EMType.Success).Build());
+                    await SafeReplyAsync("", embed: ConfigFormat.MuteModifierRemoved(user.Mention).ToEmbedMessage(EMType.Success).Build());
                     return;
                 }
 
@@ -188,7 +187,7 @@ namespace Sanakan.Modules
                 await db.SaveChangesAsync();
             }
 
-            await SafeReplyAsync("", embed: $"Wpis o użytkowniku {user.Mention} został dodany/zmieniony.".ToEmbedMessage(EMType.Success).Build());
+            await SafeReplyAsync("", embed: ConfigFormat.MuteModifierSet(user.Mention, duration, type).ToEmbedMessage(EMType.Success).Build());
         }
 
         [Command("mute")]
@@ -226,10 +225,10 @@ namespace Sanakan.Modules
                 var usr = Context.User as SocketGuildUser;
                 var info = await _moderation.MuteUserAsync(user, muteRole, null, userRole, db, duration, reason);
                 await _moderation.NotifyAboutPenaltyAsync(user, notifChannel, info, $"{usr.GetUserNickInGuild()}");
-            }
 
-            await SafeReplyAsync("", embed: $"{user.Mention} został wyciszony.".ToEmbedMessage(EMType.Success)
-                .WithImageUrl(Services.Fun.GetRandomMuteReactionGif()).Build());
+                await SafeReplyAsync("", embed: $"{user.Mention} został {PenaltyFormat.Applied(info)}.".ToEmbedMessage(EMType.Success)
+                    .WithImageUrl(Services.Fun.GetRandomMuteReactionGif()).Build());
+            }
         }
 
         [Command("mute mod")]
@@ -274,10 +273,10 @@ namespace Sanakan.Modules
                 var usr = Context.User as SocketGuildUser;
                 var info = await _moderation.MuteUserAsync(user, muteRole, muteModRole, userRole, db, duration, reason, config.ModeratorRoles);
                 await _moderation.NotifyAboutPenaltyAsync(user, notifChannel, info, $"{usr.GetUserNickInGuild()}");
-            }
 
-            await SafeReplyAsync("", embed: $"{user.Mention} został wyciszony.".ToEmbedMessage(EMType.Success)
-                .WithImageUrl(Services.Fun.GetRandomMuteReactionGif()).Build());
+                await SafeReplyAsync("", embed: $"{user.Mention} został {PenaltyFormat.Applied(info)}.".ToEmbedMessage(EMType.Success)
+                    .WithImageUrl(Services.Fun.GetRandomMuteReactionGif()).Build());
+            }
         }
 
         [Command("unmute")]
@@ -338,9 +337,9 @@ namespace Sanakan.Modules
                 config.Prefix = prefix;
                 await db.SaveChangesAsync();
 
-                QueryCacheManager.ExpireTag(new string[] { CacheTags.Guild(Context.Guild.Id) });
+                QueryCache.ExpireTag(new string[] { CacheTags.Guild(Context.Guild.Id) });
 
-                await SafeReplyAsync("", embed: $"Ustawiono `{prefix ?? "domyślny"}` prefix.".ToEmbedMessage(EMType.Success).Build());
+                await SafeReplyAsync("", embed: ConfigFormat.PrefixSet(prefix, Config.Get().Prefix).ToEmbedMessage(EMType.Success).Build());
             }
         }
 
@@ -361,17 +360,17 @@ namespace Sanakan.Modules
 
                 if (messsage.Length > 2000)
                 {
-                    await SafeReplyAsync("", embed: $"**Wiadomość jest za długa!".ToEmbedMessage(EMType.Error).Build());
+                    await SafeReplyAsync("", embed: ConfigFormat.TooLong(messsage.Length).ToEmbedMessage(EMType.Error).Build());
                     return;
                 }
 
                 config.WelcomeMessage = messsage;
                 await db.SaveChangesAsync();
 
-                QueryCacheManager.ExpireTag(new string[] { CacheTags.Guild(Context.Guild.Id) });
+                QueryCache.ExpireTag(new string[] { CacheTags.Guild(Context.Guild.Id) });
             }
 
-            await SafeReplyAsync("", embed: $"Ustawiono `{messsage}` jako wiadomość powitalną.".ToEmbedMessage(EMType.Success).Build());
+            await SafeReplyAsync("", embed: ConfigFormat.GreetingSet("wiadomość powitalną", messsage).ToEmbedMessage(EMType.Success).Build());
         }
 
         [Command("przywitaniepw")]
@@ -391,17 +390,17 @@ namespace Sanakan.Modules
 
                 if (messsage.Length > 2000)
                 {
-                    await SafeReplyAsync("", embed: $"**Wiadomość jest za długa!".ToEmbedMessage(EMType.Error).Build());
+                    await SafeReplyAsync("", embed: ConfigFormat.TooLong(messsage.Length).ToEmbedMessage(EMType.Error).Build());
                     return;
                 }
 
                 config.WelcomeMessagePW = messsage;
                 await db.SaveChangesAsync();
 
-                QueryCacheManager.ExpireTag(new string[] { CacheTags.Guild(Context.Guild.Id) });
+                QueryCache.ExpireTag(new string[] { CacheTags.Guild(Context.Guild.Id) });
             }
 
-            await SafeReplyAsync("", embed: $"Ustawiono `{messsage}` jako wiadomość powitalną wysyłaną na pw.".ToEmbedMessage(EMType.Success).Build());
+            await SafeReplyAsync("", embed: ConfigFormat.GreetingSet("wiadomość powitalną wysyłaną na PW", messsage).ToEmbedMessage(EMType.Success).Build());
         }
 
         [Command("pożegnanie")]
@@ -421,17 +420,17 @@ namespace Sanakan.Modules
 
                 if (messsage.Length > 2000)
                 {
-                    await SafeReplyAsync("", embed: $"**Wiadomość jest za długa!".ToEmbedMessage(EMType.Error).Build());
+                    await SafeReplyAsync("", embed: ConfigFormat.TooLong(messsage.Length).ToEmbedMessage(EMType.Error).Build());
                     return;
                 }
 
                 config.GoodbyeMessage = messsage;
                 await db.SaveChangesAsync();
 
-                QueryCacheManager.ExpireTag(new string[] { CacheTags.Guild(Context.Guild.Id) });
+                QueryCache.ExpireTag(new string[] { CacheTags.Guild(Context.Guild.Id) });
             }
 
-            await SafeReplyAsync("", embed: $"Ustawiono `{messsage}` jako wiadomość pożegnalną.".ToEmbedMessage(EMType.Success).Build());
+            await SafeReplyAsync("", embed: ConfigFormat.GreetingSet("wiadomość pożegnalną", messsage).ToEmbedMessage(EMType.Success).Build());
         }
 
         [Command("role", RunMode = RunMode.Async)]
@@ -579,7 +578,7 @@ namespace Sanakan.Modules
                 }
 
                 await db.SaveChangesAsync();
-                QueryCacheManager.ExpireTag(new string[] { CacheTags.Guild(guild.Id) });
+                QueryCache.ExpireTag(new string[] { CacheTags.Guild(guild.Id) });
 
                 await SafeReplyAsync("", embed: $"Przeczyszczono konfigurację serwera: **{guild.Name}**.\n\nZostało skasowanych **{clearedRows}** wpisów z bazy.".ToEmbedMessage(EMType.Success).Build());
             }
@@ -605,10 +604,10 @@ namespace Sanakan.Modules
 
                     await db.SaveChangesAsync();
 
-                    QueryCacheManager.ExpireTag(new string[] { CacheTags.Guild(Context.Guild.Id) });
+                    QueryCache.ExpireTag(new string[] { CacheTags.Guild(Context.Guild.Id) });
                 }
 
-                await SafeReplyAsync("", embed: _moderation.GetConfiguration(config, Context, type).WithTitle($"Konfiguracja {Context.Guild.Name}:").Build());
+                await SafeReplyAsync("", embed: _moderation.GetConfiguration(config, Context, type).WithTitle($"⚙️ Konfiguracja: {Context.Guild.Name}").Build());
             }
         }
 
@@ -635,7 +634,7 @@ namespace Sanakan.Modules
                 config.AdminRole = role.Id;
                 await db.SaveChangesAsync();
 
-                QueryCacheManager.ExpireTag(new string[] { CacheTags.Guild(Context.Guild.Id) });
+                QueryCache.ExpireTag(new string[] { CacheTags.Guild(Context.Guild.Id) });
 
                 await SafeReplyAsync("", embed: $"Ustawiono {role.Mention} jako rolę administratora.".ToEmbedMessage(EMType.Success).Build());
             }
@@ -664,7 +663,7 @@ namespace Sanakan.Modules
                 config.SemiAdminRole = role.Id;
                 await db.SaveChangesAsync();
 
-                QueryCacheManager.ExpireTag(new string[] { CacheTags.Guild(Context.Guild.Id) });
+                QueryCache.ExpireTag(new string[] { CacheTags.Guild(Context.Guild.Id) });
 
                 await SafeReplyAsync("", embed: $"Ustawiono {role.Mention} jako rolę semi administratora.".ToEmbedMessage(EMType.Success).Build());
             }
@@ -693,7 +692,7 @@ namespace Sanakan.Modules
                 config.TesterRole = role.Id;
                 await db.SaveChangesAsync();
 
-                QueryCacheManager.ExpireTag(new string[] { CacheTags.Guild(Context.Guild.Id) });
+                QueryCache.ExpireTag(new string[] { CacheTags.Guild(Context.Guild.Id) });
 
                 await SafeReplyAsync("", embed: $"Ustawiono {role.Mention} jako rolę testera.".ToEmbedMessage(EMType.Success).Build());
             }
@@ -722,7 +721,7 @@ namespace Sanakan.Modules
                 config.UserRole = role.Id;
                 await db.SaveChangesAsync();
 
-                QueryCacheManager.ExpireTag(new string[] { CacheTags.Guild(Context.Guild.Id) });
+                QueryCache.ExpireTag(new string[] { CacheTags.Guild(Context.Guild.Id) });
 
                 await SafeReplyAsync("", embed: $"Ustawiono {role.Mention} jako rolę użytkownika.".ToEmbedMessage(EMType.Success).Build());
             }
@@ -751,7 +750,7 @@ namespace Sanakan.Modules
                 config.NitroRole = role.Id;
                 await db.SaveChangesAsync();
 
-                QueryCacheManager.ExpireTag(new string[] { CacheTags.Guild(Context.Guild.Id) });
+                QueryCache.ExpireTag(new string[] { CacheTags.Guild(Context.Guild.Id) });
 
                 await SafeReplyAsync("", embed: $"Ustawiono {role.Mention} jako rolę nitro.".ToEmbedMessage(EMType.Success).Build());
             }
@@ -780,7 +779,7 @@ namespace Sanakan.Modules
                 config.MuteRole = role.Id;
                 await db.SaveChangesAsync();
 
-                QueryCacheManager.ExpireTag(new string[] { CacheTags.Guild(Context.Guild.Id) });
+                QueryCache.ExpireTag(new string[] { CacheTags.Guild(Context.Guild.Id) });
 
                 await SafeReplyAsync("", embed: $"Ustawiono {role.Mention} jako rolę wyciszającą użytkownika.".ToEmbedMessage(EMType.Success).Build());
             }
@@ -809,7 +808,7 @@ namespace Sanakan.Modules
                 config.ModMuteRole = role.Id;
                 await db.SaveChangesAsync();
 
-                QueryCacheManager.ExpireTag(new string[] { CacheTags.Guild(Context.Guild.Id) });
+                QueryCache.ExpireTag(new string[] { CacheTags.Guild(Context.Guild.Id) });
 
                 await SafeReplyAsync("", embed: $"Ustawiono {role.Mention} jako rolę wyciszającą moderatora.".ToEmbedMessage(EMType.Success).Build());
             }
@@ -838,7 +837,7 @@ namespace Sanakan.Modules
                 config.GlobalEmotesRole = role.Id;
                 await db.SaveChangesAsync();
 
-                QueryCacheManager.ExpireTag(new string[] { CacheTags.Guild(Context.Guild.Id) });
+                QueryCache.ExpireTag(new string[] { CacheTags.Guild(Context.Guild.Id) });
 
                 await SafeReplyAsync("", embed: $"Ustawiono {role.Mention} jako rolę globalnych emotek.".ToEmbedMessage(EMType.Success).Build());
             }
@@ -867,7 +866,7 @@ namespace Sanakan.Modules
                 config.WaifuRole = role.Id;
                 await db.SaveChangesAsync();
 
-                QueryCacheManager.ExpireTag(new string[] { CacheTags.Guild(Context.Guild.Id) });
+                QueryCache.ExpireTag(new string[] { CacheTags.Guild(Context.Guild.Id) });
 
                 await SafeReplyAsync("", embed: $"Ustawiono {role.Mention} jako rolę waifu.".ToEmbedMessage(EMType.Success).Build());
             }
@@ -894,7 +893,7 @@ namespace Sanakan.Modules
                     config.ModeratorRoles.Remove(rol);
                     await db.SaveChangesAsync();
 
-                    QueryCacheManager.ExpireTag(new string[] { CacheTags.Guild(Context.Guild.Id) });
+                    QueryCache.ExpireTag(new string[] { CacheTags.Guild(Context.Guild.Id) });
 
                     await SafeReplyAsync("", embed: $"Usunięto {role.Mention} z listy ról moderatorów.".ToEmbedMessage(EMType.Success).Build());
                     return;
@@ -904,7 +903,7 @@ namespace Sanakan.Modules
                 config.ModeratorRoles.Add(rol);
                 await db.SaveChangesAsync();
 
-                QueryCacheManager.ExpireTag(new string[] { CacheTags.Guild(Context.Guild.Id) });
+                QueryCache.ExpireTag(new string[] { CacheTags.Guild(Context.Guild.Id) });
 
                 await SafeReplyAsync("", embed: $"Ustawiono {role.Mention} jako rolę moderatora.".ToEmbedMessage(EMType.Success).Build());
             }
@@ -931,7 +930,7 @@ namespace Sanakan.Modules
                     config.RolesPerLevel.Remove(rol);
                     await db.SaveChangesAsync();
 
-                    QueryCacheManager.ExpireTag(new string[] { CacheTags.Guild(Context.Guild.Id) });
+                    QueryCache.ExpireTag(new string[] { CacheTags.Guild(Context.Guild.Id) });
 
                     await SafeReplyAsync("", embed: $"Usunięto {role.Mention} z listy ról na poziom.".ToEmbedMessage(EMType.Success).Build());
                     return;
@@ -941,7 +940,7 @@ namespace Sanakan.Modules
                 config.RolesPerLevel.Add(rol);
                 await db.SaveChangesAsync();
 
-                QueryCacheManager.ExpireTag(new string[] { CacheTags.Guild(Context.Guild.Id) });
+                QueryCache.ExpireTag(new string[] { CacheTags.Guild(Context.Guild.Id) });
 
                 await SafeReplyAsync("", embed: $"Ustawiono {role.Mention} jako rolę na poziom `{level}`.".ToEmbedMessage(EMType.Success).Build());
             }
@@ -968,7 +967,7 @@ namespace Sanakan.Modules
                     config.SelfRoles.Remove(rol);
                     await db.SaveChangesAsync();
 
-                    QueryCacheManager.ExpireTag(new string[] { CacheTags.Guild(Context.Guild.Id) });
+                    QueryCache.ExpireTag(new string[] { CacheTags.Guild(Context.Guild.Id) });
 
                     await SafeReplyAsync("", embed: $"Usunięto {role.Mention} z listy ról automatycznego zarządzania.".ToEmbedMessage(EMType.Success).Build());
                     return;
@@ -991,7 +990,7 @@ namespace Sanakan.Modules
                 config.SelfRoles.Add(rol);
                 await db.SaveChangesAsync();
 
-                QueryCacheManager.ExpireTag(new string[] { CacheTags.Guild(Context.Guild.Id) });
+                QueryCache.ExpireTag(new string[] { CacheTags.Guild(Context.Guild.Id) });
 
                 await SafeReplyAsync("", embed: $"Ustawiono {role.Mention} jako rolę automatycznego zarządzania: `{name}`.".ToEmbedMessage(EMType.Success).Build());
             }
@@ -1020,7 +1019,7 @@ namespace Sanakan.Modules
                     config.Lands.Remove(land);
                     await db.SaveChangesAsync();
 
-                    QueryCacheManager.ExpireTag(new string[] { CacheTags.Guild(Context.Guild.Id) });
+                    QueryCache.ExpireTag(new string[] { CacheTags.Guild(Context.Guild.Id) });
                     return;
                 }
 
@@ -1052,7 +1051,7 @@ namespace Sanakan.Modules
                 config.Lands.Add(land);
                 await db.SaveChangesAsync();
 
-                QueryCacheManager.ExpireTag(new string[] { CacheTags.Guild(Context.Guild.Id) });
+                QueryCache.ExpireTag(new string[] { CacheTags.Guild(Context.Guild.Id) });
 
                 await SafeReplyAsync("", embed: $"Dodano {land.Name} z właścicielem {manager.Mention} i podwładnym {underling.Mention}.".ToEmbedMessage(EMType.Success).Build());
             }
@@ -1068,17 +1067,17 @@ namespace Sanakan.Modules
                 var config = await db.GetGuildConfigOrCreateAsync(Context.Guild.Id);
                 if (config.LogChannel == Context.Channel.Id)
                 {
-                    await SafeReplyAsync("", embed: $"Kanał `{Context.Channel.Name}` już jest ustawiony jako kanał logowania usuniętych wiadomości.".ToEmbedMessage(EMType.Bot).Build());
+                    await SafeReplyAsync("", embed: $"Kanał <#{Context.Channel.Id}> już jest ustawiony jako kanał logowania usuniętych wiadomości.".ToEmbedMessage(EMType.Bot).Build());
                     return;
                 }
 
                 config.LogChannel = Context.Channel.Id;
                 await db.SaveChangesAsync();
 
-                QueryCacheManager.ExpireTag(new string[] { CacheTags.Guild(Context.Guild.Id) });
+                QueryCache.ExpireTag(new string[] { CacheTags.Guild(Context.Guild.Id) });
             }
 
-            await SafeReplyAsync("", embed: $"Ustawiono `{Context.Channel.Name}` jako kanał logowania usuniętych wiadomości.".ToEmbedMessage(EMType.Success).Build());
+            await SafeReplyAsync("", embed: $"Ustawiono <#{Context.Channel.Id}> jako kanał logowania usuniętych wiadomości.".ToEmbedMessage(EMType.Success).Build());
         }
 
         [Command("helloch")]
@@ -1091,17 +1090,17 @@ namespace Sanakan.Modules
                 var config = await db.GetGuildConfigOrCreateAsync(Context.Guild.Id);
                 if (config.GreetingChannel == Context.Channel.Id)
                 {
-                    await SafeReplyAsync("", embed: $"Kanał `{Context.Channel.Name}` już jest ustawiony jako kanał witania nowych użytkowników.".ToEmbedMessage(EMType.Bot).Build());
+                    await SafeReplyAsync("", embed: $"Kanał <#{Context.Channel.Id}> już jest ustawiony jako kanał witania nowych użytkowników.".ToEmbedMessage(EMType.Bot).Build());
                     return;
                 }
 
                 config.GreetingChannel = Context.Channel.Id;
                 await db.SaveChangesAsync();
 
-                QueryCacheManager.ExpireTag(new string[] { CacheTags.Guild(Context.Guild.Id) });
+                QueryCache.ExpireTag(new string[] { CacheTags.Guild(Context.Guild.Id) });
             }
 
-            await SafeReplyAsync("", embed: $"Ustawiono `{Context.Channel.Name}` jako kanał witania nowych użytkowników.".ToEmbedMessage(EMType.Success).Build());
+            await SafeReplyAsync("", embed: $"Ustawiono <#{Context.Channel.Id}> jako kanał witania nowych użytkowników.".ToEmbedMessage(EMType.Success).Build());
         }
 
         [Command("notifch")]
@@ -1114,17 +1113,17 @@ namespace Sanakan.Modules
                 var config = await db.GetGuildConfigOrCreateAsync(Context.Guild.Id);
                 if (config.NotificationChannel == Context.Channel.Id)
                 {
-                    await SafeReplyAsync("", embed: $"Kanał `{Context.Channel.Name}` już jest ustawiony jako kanał powiadomień o karach.".ToEmbedMessage(EMType.Bot).Build());
+                    await SafeReplyAsync("", embed: $"Kanał <#{Context.Channel.Id}> już jest ustawiony jako kanał powiadomień o karach.".ToEmbedMessage(EMType.Bot).Build());
                     return;
                 }
 
                 config.NotificationChannel = Context.Channel.Id;
                 await db.SaveChangesAsync();
 
-                QueryCacheManager.ExpireTag(new string[] { CacheTags.Guild(Context.Guild.Id) });
+                QueryCache.ExpireTag(new string[] { CacheTags.Guild(Context.Guild.Id) });
             }
 
-            await SafeReplyAsync("", embed: $"Ustawiono `{Context.Channel.Name}` jako kanał powiadomień o karach.".ToEmbedMessage(EMType.Success).Build());
+            await SafeReplyAsync("", embed: $"Ustawiono <#{Context.Channel.Id}> jako kanał powiadomień o karach.".ToEmbedMessage(EMType.Success).Build());
         }
 
         [Command("raportch")]
@@ -1137,40 +1136,17 @@ namespace Sanakan.Modules
                 var config = await db.GetGuildConfigOrCreateAsync(Context.Guild.Id);
                 if (config.RaportChannel == Context.Channel.Id)
                 {
-                    await SafeReplyAsync("", embed: $"Kanał `{Context.Channel.Name}` już jest ustawiony jako kanał raportów.".ToEmbedMessage(EMType.Bot).Build());
+                    await SafeReplyAsync("", embed: $"Kanał <#{Context.Channel.Id}> już jest ustawiony jako kanał raportów.".ToEmbedMessage(EMType.Bot).Build());
                     return;
                 }
 
                 config.RaportChannel = Context.Channel.Id;
                 await db.SaveChangesAsync();
 
-                QueryCacheManager.ExpireTag(new string[] { CacheTags.Guild(Context.Guild.Id) });
+                QueryCache.ExpireTag(new string[] { CacheTags.Guild(Context.Guild.Id) });
             }
 
-            await SafeReplyAsync("", embed: $"Ustawiono `{Context.Channel.Name}` jako kanał raportów.".ToEmbedMessage(EMType.Success).Build());
-        }
-
-        [Command("quizch")]
-        [Summary("ustawia kanał quizów")]
-        [Remarks(""), RequireAdminRole]
-        public async Task SetQuizChannelAsync()
-        {
-            using (var db = new Database.DatabaseContext(Config))
-            {
-                var config = await db.GetGuildConfigOrCreateAsync(Context.Guild.Id);
-                if (config.QuizChannel == Context.Channel.Id)
-                {
-                    await SafeReplyAsync("", embed: $"Kanał `{Context.Channel.Name}` już jest ustawiony jako kanał quizów.".ToEmbedMessage(EMType.Bot).Build());
-                    return;
-                }
-
-                config.QuizChannel = Context.Channel.Id;
-                await db.SaveChangesAsync();
-
-                QueryCacheManager.ExpireTag(new string[] { CacheTags.Guild(Context.Guild.Id) });
-            }
-
-            await SafeReplyAsync("", embed: $"Ustawiono `{Context.Channel.Name}` jako kanał quizów.".ToEmbedMessage(EMType.Success).Build());
+            await SafeReplyAsync("", embed: $"Ustawiono <#{Context.Channel.Id}> jako kanał raportów.".ToEmbedMessage(EMType.Success).Build());
         }
 
         [Command("todoch")]
@@ -1183,17 +1159,17 @@ namespace Sanakan.Modules
                 var config = await db.GetGuildConfigOrCreateAsync(Context.Guild.Id);
                 if (config.ToDoChannel == Context.Channel.Id)
                 {
-                    await SafeReplyAsync("", embed: $"Kanał `{Context.Channel.Name}` już jest ustawiony jako kanał todo.".ToEmbedMessage(EMType.Bot).Build());
+                    await SafeReplyAsync("", embed: $"Kanał <#{Context.Channel.Id}> już jest ustawiony jako kanał todo.".ToEmbedMessage(EMType.Bot).Build());
                     return;
                 }
 
                 config.ToDoChannel = Context.Channel.Id;
                 await db.SaveChangesAsync();
 
-                QueryCacheManager.ExpireTag(new string[] { CacheTags.Guild(Context.Guild.Id) });
+                QueryCache.ExpireTag(new string[] { CacheTags.Guild(Context.Guild.Id) });
             }
 
-            await SafeReplyAsync("", embed: $"Ustawiono `{Context.Channel.Name}` jako kanał todo.".ToEmbedMessage(EMType.Success).Build());
+            await SafeReplyAsync("", embed: $"Ustawiono <#{Context.Channel.Id}> jako kanał todo.".ToEmbedMessage(EMType.Success).Build());
         }
 
         [Command("nsfwch")]
@@ -1206,17 +1182,17 @@ namespace Sanakan.Modules
                 var config = await db.GetGuildConfigOrCreateAsync(Context.Guild.Id);
                 if (config.NsfwChannel == Context.Channel.Id)
                 {
-                    await SafeReplyAsync("", embed: $"Kanał `{Context.Channel.Name}` już jest ustawiony jako kanał nsfw.".ToEmbedMessage(EMType.Bot).Build());
+                    await SafeReplyAsync("", embed: $"Kanał <#{Context.Channel.Id}> już jest ustawiony jako kanał nsfw.".ToEmbedMessage(EMType.Bot).Build());
                     return;
                 }
 
                 config.NsfwChannel = Context.Channel.Id;
                 await db.SaveChangesAsync();
 
-                QueryCacheManager.ExpireTag(new string[] { CacheTags.Guild(Context.Guild.Id) });
+                QueryCache.ExpireTag(new string[] { CacheTags.Guild(Context.Guild.Id) });
             }
 
-            await SafeReplyAsync("", embed: $"Ustawiono `{Context.Channel.Name}` jako kanał nsfw.".ToEmbedMessage(EMType.Success).Build());
+            await SafeReplyAsync("", embed: $"Ustawiono <#{Context.Channel.Id}> jako kanał nsfw.".ToEmbedMessage(EMType.Success).Build());
         }
 
         [Command("tfightch")]
@@ -1232,17 +1208,17 @@ namespace Sanakan.Modules
 
                 if (config.WaifuConfig.TrashFightChannel == Context.Channel.Id)
                 {
-                    await SafeReplyAsync("", embed: $"Kanał `{Context.Channel.Name}` już jest ustawiony jako kanał śmieciowy walk waifu.".ToEmbedMessage(EMType.Bot).Build());
+                    await SafeReplyAsync("", embed: $"Kanał <#{Context.Channel.Id}> już jest ustawiony jako kanał śmieciowy walk waifu.".ToEmbedMessage(EMType.Bot).Build());
                     return;
                 }
 
                 config.WaifuConfig.TrashFightChannel = Context.Channel.Id;
                 await db.SaveChangesAsync();
 
-                QueryCacheManager.ExpireTag(new string[] { CacheTags.Guild(Context.Guild.Id) });
+                QueryCache.ExpireTag(new string[] { CacheTags.Guild(Context.Guild.Id) });
             }
 
-            await SafeReplyAsync("", embed: $"Ustawiono `{Context.Channel.Name}` jako kanał śmieciowy walk waifu.".ToEmbedMessage(EMType.Success).Build());
+            await SafeReplyAsync("", embed: $"Ustawiono <#{Context.Channel.Id}> jako kanał śmieciowy walk waifu.".ToEmbedMessage(EMType.Success).Build());
         }
 
         [Command("tcmdch")]
@@ -1258,17 +1234,17 @@ namespace Sanakan.Modules
 
                 if (config.WaifuConfig.TrashCommandsChannel == Context.Channel.Id)
                 {
-                    await SafeReplyAsync("", embed: $"Kanał `{Context.Channel.Name}` już jest ustawiony jako kanał śmieciowy poleceń waifu.".ToEmbedMessage(EMType.Bot).Build());
+                    await SafeReplyAsync("", embed: $"Kanał <#{Context.Channel.Id}> już jest ustawiony jako kanał śmieciowy poleceń waifu.".ToEmbedMessage(EMType.Bot).Build());
                     return;
                 }
 
                 config.WaifuConfig.TrashCommandsChannel = Context.Channel.Id;
                 await db.SaveChangesAsync();
 
-                QueryCacheManager.ExpireTag(new string[] { CacheTags.Guild(Context.Guild.Id) });
+                QueryCache.ExpireTag(new string[] { CacheTags.Guild(Context.Guild.Id) });
             }
 
-            await SafeReplyAsync("", embed: $"Ustawiono `{Context.Channel.Name}` jako kanał śmieciowy poleceń waifu.".ToEmbedMessage(EMType.Success).Build());
+            await SafeReplyAsync("", embed: $"Ustawiono <#{Context.Channel.Id}> jako kanał śmieciowy poleceń waifu.".ToEmbedMessage(EMType.Success).Build());
         }
 
         [Command("tsafarich")]
@@ -1284,17 +1260,17 @@ namespace Sanakan.Modules
 
                 if (config.WaifuConfig.TrashSpawnChannel == Context.Channel.Id)
                 {
-                    await SafeReplyAsync("", embed: $"Kanał `{Context.Channel.Name}` już jest ustawiony jako kanał śmieciowy polowań waifu.".ToEmbedMessage(EMType.Bot).Build());
+                    await SafeReplyAsync("", embed: $"Kanał <#{Context.Channel.Id}> już jest ustawiony jako kanał śmieciowy polowań waifu.".ToEmbedMessage(EMType.Bot).Build());
                     return;
                 }
 
                 config.WaifuConfig.TrashSpawnChannel = Context.Channel.Id;
                 await db.SaveChangesAsync();
 
-                QueryCacheManager.ExpireTag(new string[] { CacheTags.Guild(Context.Guild.Id) });
+                QueryCache.ExpireTag(new string[] { CacheTags.Guild(Context.Guild.Id) });
             }
 
-            await SafeReplyAsync("", embed: $"Ustawiono `{Context.Channel.Name}` jako kanał śmieciowy polowań waifu.".ToEmbedMessage(EMType.Success).Build());
+            await SafeReplyAsync("", embed: $"Ustawiono <#{Context.Channel.Id}> jako kanał śmieciowy polowań waifu.".ToEmbedMessage(EMType.Success).Build());
         }
 
         [Command("marketch")]
@@ -1310,17 +1286,17 @@ namespace Sanakan.Modules
 
                 if (config.WaifuConfig.MarketChannel == Context.Channel.Id)
                 {
-                    await SafeReplyAsync("", embed: $"Kanał `{Context.Channel.Name}` już jest ustawiony jako kanał rynku waifu.".ToEmbedMessage(EMType.Bot).Build());
+                    await SafeReplyAsync("", embed: $"Kanał <#{Context.Channel.Id}> już jest ustawiony jako kanał rynku waifu.".ToEmbedMessage(EMType.Bot).Build());
                     return;
                 }
 
                 config.WaifuConfig.MarketChannel = Context.Channel.Id;
                 await db.SaveChangesAsync();
 
-                QueryCacheManager.ExpireTag(new string[] { CacheTags.Guild(Context.Guild.Id) });
+                QueryCache.ExpireTag(new string[] { CacheTags.Guild(Context.Guild.Id) });
             }
 
-            await SafeReplyAsync("", embed: $"Ustawiono `{Context.Channel.Name}` jako kanał rynku waifu.".ToEmbedMessage(EMType.Success).Build());
+            await SafeReplyAsync("", embed: $"Ustawiono <#{Context.Channel.Id}> jako kanał rynku waifu.".ToEmbedMessage(EMType.Success).Build());
         }
 
         [Command("duelch")]
@@ -1336,17 +1312,17 @@ namespace Sanakan.Modules
 
                 if (config.WaifuConfig.DuelChannel == Context.Channel.Id)
                 {
-                    await SafeReplyAsync("", embed: $"Kanał `{Context.Channel.Name}` już jest ustawiony jako kanał pojedynków waifu.".ToEmbedMessage(EMType.Bot).Build());
+                    await SafeReplyAsync("", embed: $"Kanał <#{Context.Channel.Id}> już jest ustawiony jako kanał pojedynków waifu.".ToEmbedMessage(EMType.Bot).Build());
                     return;
                 }
 
                 config.WaifuConfig.DuelChannel = Context.Channel.Id;
                 await db.SaveChangesAsync();
 
-                QueryCacheManager.ExpireTag(new string[] { CacheTags.Guild(Context.Guild.Id) });
+                QueryCache.ExpireTag(new string[] { CacheTags.Guild(Context.Guild.Id) });
             }
 
-            await SafeReplyAsync("", embed: $"Ustawiono `{Context.Channel.Name}` jako kanał pojedynków waifu.".ToEmbedMessage(EMType.Success).Build());
+            await SafeReplyAsync("", embed: $"Ustawiono <#{Context.Channel.Id}> jako kanał pojedynków waifu.".ToEmbedMessage(EMType.Success).Build());
         }
 
         [Command("spawnch")]
@@ -1362,17 +1338,17 @@ namespace Sanakan.Modules
 
                 if (config.WaifuConfig.SpawnChannel == Context.Channel.Id)
                 {
-                    await SafeReplyAsync("", embed: $"Kanał `{Context.Channel.Name}` już jest ustawiony jako kanał safari waifu.".ToEmbedMessage(EMType.Bot).Build());
+                    await SafeReplyAsync("", embed: $"Kanał <#{Context.Channel.Id}> już jest ustawiony jako kanał safari waifu.".ToEmbedMessage(EMType.Bot).Build());
                     return;
                 }
 
                 config.WaifuConfig.SpawnChannel = Context.Channel.Id;
                 await db.SaveChangesAsync();
 
-                QueryCacheManager.ExpireTag(new string[] { CacheTags.Guild(Context.Guild.Id) });
+                QueryCache.ExpireTag(new string[] { CacheTags.Guild(Context.Guild.Id) });
             }
 
-            await SafeReplyAsync("", embed: $"Ustawiono `{Context.Channel.Name}` jako kanał safari waifu.".ToEmbedMessage(EMType.Success).Build());
+            await SafeReplyAsync("", embed: $"Ustawiono <#{Context.Channel.Id}> jako kanał safari waifu.".ToEmbedMessage(EMType.Success).Build());
         }
 
         [Command("fightch")]
@@ -1392,9 +1368,9 @@ namespace Sanakan.Modules
                     config.WaifuConfig.FightChannels.Remove(chan);
                     await db.SaveChangesAsync();
 
-                    QueryCacheManager.ExpireTag(new string[] { CacheTags.Guild(Context.Guild.Id) });
+                    QueryCache.ExpireTag(new string[] { CacheTags.Guild(Context.Guild.Id) });
 
-                    await SafeReplyAsync("", embed: $"Usunięto `{Context.Channel.Name}` z listy kanałów walk waifu.".ToEmbedMessage(EMType.Success).Build());
+                    await SafeReplyAsync("", embed: $"Usunięto <#{Context.Channel.Id}> z listy kanałów walk waifu.".ToEmbedMessage(EMType.Success).Build());
                     return;
                 }
 
@@ -1402,10 +1378,10 @@ namespace Sanakan.Modules
                 config.WaifuConfig.FightChannels.Add(chan);
                 await db.SaveChangesAsync();
 
-                QueryCacheManager.ExpireTag(new string[] { CacheTags.Guild(Context.Guild.Id) });
+                QueryCache.ExpireTag(new string[] { CacheTags.Guild(Context.Guild.Id) });
             }
 
-            await SafeReplyAsync("", embed: $"Ustawiono `{Context.Channel.Name}` jako kanał walk waifu.".ToEmbedMessage(EMType.Success).Build());
+            await SafeReplyAsync("", embed: $"Ustawiono <#{Context.Channel.Id}> jako kanał walk waifu.".ToEmbedMessage(EMType.Success).Build());
         }
 
         [Command("wcmdch")]
@@ -1425,9 +1401,9 @@ namespace Sanakan.Modules
                     config.WaifuConfig.CommandChannels.Remove(chan);
                     await db.SaveChangesAsync();
 
-                    QueryCacheManager.ExpireTag(new string[] { CacheTags.Guild(Context.Guild.Id) });
+                    QueryCache.ExpireTag(new string[] { CacheTags.Guild(Context.Guild.Id) });
 
-                    await SafeReplyAsync("", embed: $"Usunięto `{Context.Channel.Name}` z listy kanałów poleceń waifu.".ToEmbedMessage(EMType.Success).Build());
+                    await SafeReplyAsync("", embed: $"Usunięto <#{Context.Channel.Id}> z listy kanałów poleceń waifu.".ToEmbedMessage(EMType.Success).Build());
                     return;
                 }
 
@@ -1435,10 +1411,10 @@ namespace Sanakan.Modules
                 config.WaifuConfig.CommandChannels.Add(chan);
                 await db.SaveChangesAsync();
 
-                QueryCacheManager.ExpireTag(new string[] { CacheTags.Guild(Context.Guild.Id) });
+                QueryCache.ExpireTag(new string[] { CacheTags.Guild(Context.Guild.Id) });
             }
 
-            await SafeReplyAsync("", embed: $"Ustawiono `{Context.Channel.Name}` jako kanał poleceń waifu.".ToEmbedMessage(EMType.Success).Build());
+            await SafeReplyAsync("", embed: $"Ustawiono <#{Context.Channel.Id}> jako kanał poleceń waifu.".ToEmbedMessage(EMType.Success).Build());
         }
 
         [Command("cmdch")]
@@ -1456,9 +1432,9 @@ namespace Sanakan.Modules
                     config.CommandChannels.Remove(chan);
                     await db.SaveChangesAsync();
 
-                    QueryCacheManager.ExpireTag(new string[] { CacheTags.Guild(Context.Guild.Id) });
+                    QueryCache.ExpireTag(new string[] { CacheTags.Guild(Context.Guild.Id) });
 
-                    await SafeReplyAsync("", embed: $"Usunięto `{Context.Channel.Name}` z listy kanałów poleceń.".ToEmbedMessage(EMType.Success).Build());
+                    await SafeReplyAsync("", embed: $"Usunięto <#{Context.Channel.Id}> z listy kanałów poleceń.".ToEmbedMessage(EMType.Success).Build());
                     return;
                 }
 
@@ -1466,10 +1442,10 @@ namespace Sanakan.Modules
                 config.CommandChannels.Add(chan);
                 await db.SaveChangesAsync();
 
-                QueryCacheManager.ExpireTag(new string[] { CacheTags.Guild(Context.Guild.Id) });
+                QueryCache.ExpireTag(new string[] { CacheTags.Guild(Context.Guild.Id) });
             }
 
-            await SafeReplyAsync("", embed: $"Ustawiono `{Context.Channel.Name}` jako kanał poleceń.".ToEmbedMessage(EMType.Success).Build());
+            await SafeReplyAsync("", embed: $"Ustawiono <#{Context.Channel.Id}> jako kanał poleceń.".ToEmbedMessage(EMType.Success).Build());
         }
 
         [Command("chinfo", RunMode = RunMode.Async)]
@@ -1500,7 +1476,8 @@ namespace Sanakan.Modules
                 var parentIsIgnored = config.IgnoredChannels.Any(x => x.Channel == parentId);
                 var parentIssNoExp = config.ChannelsWithoutExp.Any(x => x.Channel == parentId);
 
-                await SafeReplyAsync("", embed: $"`{channelInfo.Name}`:\n\nI {isIgnored.GetYesNo()}\nNE {isNoExp.GetYesNo()}\nIP {parentIsIgnored.GetYesNo()}\nNEP {parentIssNoExp.GetYesNo()}".ToEmbedMessage(EMType.Info).Build());
+                await SafeReplyAsync("", embed: ConfigFormat.ChannelInfo(isIgnored, isNoExp, parentId != 0, parentIsIgnored, parentIssNoExp)
+                    .ToEmbedMessage(EMType.Info).WithTitle($"ℹ️ #{channelInfo.Name}").Build());
             }
         }
 
@@ -1527,9 +1504,9 @@ namespace Sanakan.Modules
                     config.IgnoredChannels.Remove(chan);
                     await db.SaveChangesAsync();
 
-                    QueryCacheManager.ExpireTag(new string[] { CacheTags.Guild(Context.Guild.Id) });
+                    QueryCache.ExpireTag(new string[] { CacheTags.Guild(Context.Guild.Id) });
 
-                    await SafeReplyAsync("", embed: $"Usunięto `{channelInfo.Name}` z listy kanałów ignorowanych.".ToEmbedMessage(EMType.Success).Build());
+                    await SafeReplyAsync("", embed: $"Usunięto <#{channelInfo.Id}> z listy kanałów ignorowanych.".ToEmbedMessage(EMType.Success).Build());
                     return;
                 }
 
@@ -1537,10 +1514,10 @@ namespace Sanakan.Modules
                 config.IgnoredChannels.Add(chan);
                 await db.SaveChangesAsync();
 
-                QueryCacheManager.ExpireTag(new string[] { CacheTags.Guild(Context.Guild.Id) });
+                QueryCache.ExpireTag(new string[] { CacheTags.Guild(Context.Guild.Id) });
             }
 
-            await SafeReplyAsync("", embed: $"Ustawiono `{channelInfo.Name}` jako kanał ignorowany.".ToEmbedMessage(EMType.Success).Build());
+            await SafeReplyAsync("", embed: $"Ustawiono <#{channelInfo.Id}> jako kanał ignorowany.".ToEmbedMessage(EMType.Success).Build());
         }
 
         [Command("noexpch")]
@@ -1566,9 +1543,9 @@ namespace Sanakan.Modules
                     config.ChannelsWithoutExp.Remove(chan);
                     await db.SaveChangesAsync();
 
-                    QueryCacheManager.ExpireTag(new string[] { CacheTags.Guild(Context.Guild.Id) });
+                    QueryCache.ExpireTag(new string[] { CacheTags.Guild(Context.Guild.Id) });
 
-                    await SafeReplyAsync("", embed: $"Usunięto `{channelInfo.Name}` z listy kanałów bez doświadczenia.".ToEmbedMessage(EMType.Success).Build());
+                    await SafeReplyAsync("", embed: $"Usunięto <#{channelInfo.Id}> z listy kanałów bez doświadczenia.".ToEmbedMessage(EMType.Success).Build());
                     return;
                 }
 
@@ -1576,10 +1553,10 @@ namespace Sanakan.Modules
                 config.ChannelsWithoutExp.Add(chan);
                 await db.SaveChangesAsync();
 
-                QueryCacheManager.ExpireTag(new string[] { CacheTags.Guild(Context.Guild.Id) });
+                QueryCache.ExpireTag(new string[] { CacheTags.Guild(Context.Guild.Id) });
             }
 
-            await SafeReplyAsync("", embed: $"Ustawiono `{channelInfo.Name}` jako kanał bez doświadczenia.".ToEmbedMessage(EMType.Success).Build());
+            await SafeReplyAsync("", embed: $"Ustawiono <#{channelInfo.Id}> jako kanał bez doświadczenia.".ToEmbedMessage(EMType.Success).Build());
         }
 
         [Command("nosupch")]
@@ -1597,9 +1574,9 @@ namespace Sanakan.Modules
                     config.ChannelsWithoutSupervision.Remove(chan);
                     await db.SaveChangesAsync();
 
-                    QueryCacheManager.ExpireTag(new string[] { CacheTags.Guild(Context.Guild.Id) });
+                    QueryCache.ExpireTag(new string[] { CacheTags.Guild(Context.Guild.Id) });
 
-                    await SafeReplyAsync("", embed: $"Usunięto `{Context.Channel.Name}` z listy kanałów bez nadzoru.".ToEmbedMessage(EMType.Success).Build());
+                    await SafeReplyAsync("", embed: $"Usunięto <#{Context.Channel.Id}> z listy kanałów bez nadzoru.".ToEmbedMessage(EMType.Success).Build());
                     return;
                 }
 
@@ -1607,10 +1584,10 @@ namespace Sanakan.Modules
                 config.ChannelsWithoutSupervision.Add(chan);
                 await db.SaveChangesAsync();
 
-                QueryCacheManager.ExpireTag(new string[] { CacheTags.Guild(Context.Guild.Id) });
+                QueryCache.ExpireTag(new string[] { CacheTags.Guild(Context.Guild.Id) });
             }
 
-            await SafeReplyAsync("", embed: $"Ustawiono `{Context.Channel.Name}` jako kanał bez nadzoru.".ToEmbedMessage(EMType.Success).Build());
+            await SafeReplyAsync("", embed: $"Ustawiono <#{Context.Channel.Id}> jako kanał bez nadzoru.".ToEmbedMessage(EMType.Success).Build());
         }
 
         [Command("alwaysban")]
@@ -1647,7 +1624,7 @@ namespace Sanakan.Modules
 
                 await db.SaveChangesAsync();
 
-                QueryCacheManager.ExpireTag(new string[] { CacheTags.Guild(Context.Guild.Id) });
+                QueryCache.ExpireTag(new string[] { CacheTags.Guild(Context.Guild.Id) });
 
                 var channel = config.AlwaysBanChannel == 0 ? null : Context.Guild.GetTextChannel(config.AlwaysBanChannel);
                 var desc = config.AlwaysBanChannel == 0
@@ -1724,7 +1701,7 @@ namespace Sanakan.Modules
                 }
 
                 await SafeAddReactionToMsg(Context.Message, new Emoji("👌"));
-                await todoChannel.SendMessageAsync(message.GetJumpUrl(), embed: _moderation.BuildTodo(message, Context.User as SocketGuildUser));
+                await todoChannel.SendMessageAsync("", embed: _moderation.BuildTodo(message, Context.User as SocketGuildUser, guild.Id, DateTimeOffset.Now));
             }
         }
 
@@ -1748,7 +1725,7 @@ namespace Sanakan.Modules
             }
 
             await SafeAddReactionToMsg(Context.Message, new Emoji("👌"));
-            await channel2Send.SendMessageAsync(message.GetJumpUrl(), embed: _moderation.BuildTodo(message, Context.User as SocketGuildUser));
+            await channel2Send.SendMessageAsync("", embed: _moderation.BuildQuote(message, Context.User as SocketGuildUser));
         }
 
         [Command("tchaos")]
@@ -1763,9 +1740,9 @@ namespace Sanakan.Modules
                 config.ChaosMode = !config.ChaosMode;
                 await db.SaveChangesAsync();
 
-                QueryCacheManager.ExpireTag(new string[] { CacheTags.Guild(Context.Guild.Id) });
+                QueryCache.ExpireTag(new string[] { CacheTags.Guild(Context.Guild.Id) });
 
-                await SafeReplyAsync("", embed: $"Tryb siania chaosu - włączony? `{config.ChaosMode.GetYesNo()}`.".ToEmbedMessage(EMType.Success).Build());
+                await SafeReplyAsync("", embed: ConfigFormat.Toggle("Tryb siania chaosu", config.ChaosMode).ToEmbedMessage(EMType.Success).Build());
             }
         }
 
@@ -1781,9 +1758,9 @@ namespace Sanakan.Modules
                 config.Supervision = !config.Supervision;
                 await db.SaveChangesAsync();
 
-                QueryCacheManager.ExpireTag(new string[] { CacheTags.Guild(Context.Guild.Id) });
+                QueryCache.ExpireTag(new string[] { CacheTags.Guild(Context.Guild.Id) });
 
-                await SafeReplyAsync("", embed: $"Tryb nadzoru - włączony? `{config.Supervision.GetYesNo()}`.".ToEmbedMessage(EMType.Success).Build());
+                await SafeReplyAsync("", embed: ConfigFormat.Toggle("Tryb nadzoru", config.Supervision).ToEmbedMessage(EMType.Success).Build());
             }
         }
 
@@ -1792,7 +1769,8 @@ namespace Sanakan.Modules
         [Remarks("Karna"), RequireAnyAdminOrModRole]
         public async Task CheckUserAsync([Summary("użytkownik")] SocketGuildUser user)
         {
-            string report = "**Globalki:** ✅\n\n";
+            const string globals = "Globalne emotki", color = "Kolor", rainbow = "Tęczowy kolor";
+            string report = ConfigFormat.CheckLine(globals, ConfigFormat.CheckState.Ok) + "\n";
             using (var db = new Database.DatabaseContext(Config))
             {
                 var guildConfig = await db.GetCachedGuildFullConfigAsync(user.Guild.Id);
@@ -1811,53 +1789,53 @@ namespace Sanakan.Modules
                         var sub = duser.TimeStatuses.FirstOrDefault(x => x.Type == StatusType.Globals && x.Guild == user.Guild.Id);
                         if (sub == null)
                         {
-                            report = $"**Globalki:** ❗\n\n";
+                            report = ConfigFormat.CheckLine(globals, ConfigFormat.CheckState.Unpaid) + "\n";
                             await user.RemoveRoleAsync(globalRole);
                         }
                         else if (!sub.IsActive(_time.Now()))
                         {
-                            report = $"**Globalki:** ⚠\n\n";
+                            report = ConfigFormat.CheckLine(globals, ConfigFormat.CheckState.Expired) + "\n";
                             await user.RemoveRoleAsync(globalRole);
                         }
                     }
                 }
 
-                string kolorRep = $"**Kolor:** ✅\n\n";
+                string kolorRep = ConfigFormat.CheckLine(color, ConfigFormat.CheckState.Ok) + "\n";
                 var colorRoles = (IEnumerable<uint>)Enum.GetValues(typeof(FColor));
                 if (user.Roles.Any(x => colorRoles.Any(c => c.ToString() == x.Name)))
                 {
                     var sub = duser.TimeStatuses.FirstOrDefault(x => x.Type == StatusType.Color && x.Guild == user.Guild.Id);
                     if (sub == null)
                     {
-                        kolorRep = $"**Kolor:** ❗\n\n";
+                        kolorRep = ConfigFormat.CheckLine(color, ConfigFormat.CheckState.Unpaid) + "\n";
                         await _profile.RomoveUserColorAsync(user);
                     }
                     else if (!sub.IsActive(_time.Now()))
                     {
-                        kolorRep = $"**Kolor:** ⚠\n\n";
+                        kolorRep = ConfigFormat.CheckLine(color, ConfigFormat.CheckState.Expired) + "\n";
                         await _profile.RomoveUserColorAsync(user);
                     }
                 }
                 report += kolorRep;
 
-                string rkolorRep = $"**RKolor:** ✅\n\n";
+                string rkolorRep = ConfigFormat.CheckLine(rainbow, ConfigFormat.CheckState.Ok) + "\n";
                 if (user.Roles.Any(x => x.Name.StartsWith(_profile.GetRainbowColorNameStart())))
                 {
                     var sub = duser.TimeStatuses.FirstOrDefault(x => x.Type == StatusType.RainbowColor && x.Guild == user.Guild.Id);
                     if (sub == null)
                     {
-                        rkolorRep = $"**RKolor:** ❗\n\n";
+                        rkolorRep = ConfigFormat.CheckLine(rainbow, ConfigFormat.CheckState.Unpaid) + "\n";
                         await _profile.RemoveUserRainbowColorAsync(user, _profile.GetRainbowColorNameStart());
                     }
                     else if (!sub.IsActive(_time.Now()))
                     {
-                        rkolorRep = $"**RKolor:** ⚠\n\n";
+                        rkolorRep = ConfigFormat.CheckLine(rainbow, ConfigFormat.CheckState.Expired) + "\n";
                         await _profile.RemoveUserRainbowColorAsync(user, _profile.GetRainbowColorNameStart());
                     }
                 }
                 report += rkolorRep;
 
-                string nickRep = $"**Nick:** ✅";
+                string nickRep = "✅ **Nick:** w porządku";
                 if (guildConfig.UserRole != 0)
                 {
                     var userRole = user.Guild.GetRole(guildConfig.UserRole);
@@ -1874,9 +1852,9 @@ namespace Sanakan.Modules
                                     if (res.IsSuccessStatusCode())
                                     {
                                         if (res.Body.Name != realNick)
-                                            nickRep = $"**Nick:** ❗ {res.Body.Name}";
+                                            nickRep = $"❗ **Nick:** inny niż na Shindenie: {res.Body.Name}";
                                     }
-                                    else nickRep = $"**Nick:** ❗ D: {duser.Shinden}";
+                                    else nickRep = $"❗ **Nick:** nie udało się pobrać konta Shinden {duser.Shinden}";
                                 }
                                 else
                                 {
@@ -1884,14 +1862,14 @@ namespace Sanakan.Modules
                                     if (res.IsSuccessStatusCode())
                                     {
                                         if (!res.Body.Any(x => x.Name.Equals(realNick, StringComparison.Ordinal)))
-                                            nickRep = $"**Nick:** ⚠";
+                                            nickRep = "⚠ **Nick:** brak konta Shinden o takim nicku";
                                     }
-                                    else nickRep = $"**Nick:** ⚠";
+                                    else nickRep = "⚠ **Nick:** nie udało się wyszukać konta Shinden";
                                 }
                             }
                             catch (Exception)
                             {
-                                nickRep = $"**Nick:** ❔ brak połączenia z Shindenem";
+                                nickRep = "❔ **Nick:** brak połączenia z Shindenem";
                             }
                         }
                     }
@@ -1899,7 +1877,7 @@ namespace Sanakan.Modules
                 report += nickRep;
             }
 
-            await SafeReplyAsync("", embed: report.ToEmbedMessage(EMType.Bot).WithAuthor(new EmbedAuthorBuilder().WithUser(user)).Build());
+            await SafeReplyAsync("", embed: report.ToEmbedMessage(EMType.Bot).WithTitle("🔍 Sprawdzenie gracza").WithAuthor(new EmbedAuthorBuilder().WithUser(user)).Build());
         }
 
         [Command("loteria", RunMode = RunMode.Async)]
@@ -1909,7 +1887,7 @@ namespace Sanakan.Modules
         {
             var emote = new Emoji("🎰");
             var time = _time.Now().AddMinutes(duration);
-            var msg = await SafeReplyAsync("", embed: $"Loteria! zareaguj {emote}, aby wziąć udział.\n\n Koniec `{time.ToShortTimeString()}:{time.Second:00}`".ToEmbedMessage(EMType.Bot).Build());
+            var msg = await SafeReplyAsync("", embed: $"Zareaguj {emote}, aby wziąć udział. Koniec {time.ToRemTime()}.".ToEmbedMessage(EMType.Bot).WithTitle("🎰 Loteria").Build());
 
             await msg.AddReactionAsync(emote);
             await Task.Delay(TimeSpan.FromMinutes(duration));
@@ -1918,14 +1896,16 @@ namespace Sanakan.Modules
             var reactions = (await msg.GetReactionUsersAsync(emote, 300).FlattenAsync()).ToList();
             if (reactions.Count < 1)
             {
-                await SafeReplyAsync("", embed: "Nikt nie wziął udziału w loterii.".ToEmbedMessage(EMType.Error).Build());
+                await SafeReplyAsync("", embed: new EmbedBuilder().WithTitle("🎰 Loteria bez zwycięzcy").WithDescription("Nikt nie wziął udziału.")
+                    .WithColor(Debug.LotteryNoWinnerColor).Build());
                 return;
             }
 
             var winner = Services.Fun.GetOneRandomFrom(reactions);
             await msg.DeleteAsync();
 
-            await SafeReplyAsync("", embed: $"Zwycięzca loterii: {winner.Mention}".ToEmbedMessage(EMType.Success).Build());
+            await SafeReplyAsync("", embed: new EmbedBuilder().WithTitle("🎉 Loteria rozstrzygnięta").WithDescription($"Wygrywa {winner.Mention}!")
+                .WithColor(Debug.LotteryWinColor).Build());
         }
 
         [Command("pary", RunMode = RunMode.Async)]
@@ -2011,24 +1991,25 @@ namespace Sanakan.Modules
                 }
 
                 var reportMsg = await reportChannel.GetMessageAsync(raport.Message);
+                var moderator = (Context.User as SocketGuildUser)?.GetUserNickInGuild() ?? Context.User.Username;
+
+                EmbedBuilder report = null;
+                try
+                {
+                    report = reportMsg?.Embeds?.FirstOrDefault()?.ToEmbedBuilder();
+                }
+                catch (Exception ex)
+                {
+                    Logger?.LogError($"Mod: report edit {raport.Id}: {ex.Message}");
+                }
+
                 if (duration == -1)
                 {
-                    if (reportMsg != null)
-                    {
-                        try
-                        {
-                            var rEmbedBuilder = reportMsg?.Embeds?.FirstOrDefault().ToEmbedBuilder();
+                    if (report != null)
+                        await SafeReplyAsync("", embed: ReportFormat.Resolve(report, false, "odrzucone", moderator).Build());
 
-                            rEmbedBuilder.Color = EMType.Info.Color();
-                            rEmbedBuilder.Fields.FirstOrDefault(x => x.Name == "Id zgloszenia:").Value = "Odrzucone!";
-                            await SafeReplyAsync("", embed: rEmbedBuilder.Build());
-                        }
-                        catch (Exception ex)
-                        {
-                            Logger?.LogError($"mod: edycja raportu {raport.Id}: {ex.Message}");
-                        }
+                    if (reportMsg != null)
                         await reportMsg.DeleteAsync();
-                    }
 
                     config.Raports.Remove(raport);
                     await db.SaveChangesAsync();
@@ -2037,81 +2018,87 @@ namespace Sanakan.Modules
                 if (duration < 0) return;
 
                 bool warning = duration == 0;
+                if (reason == "z raportu" && report != null)
+                    reason = ReportFormat.GetReason(report) ?? reason;
+
                 if (reportMsg != null)
-                {
-                    try
-                    {
-                        var rEmbedBuilder = reportMsg?.Embeds?.FirstOrDefault().ToEmbedBuilder();
-                        if (reason == "z raportu")
-                            reason = rEmbedBuilder?.Fields.FirstOrDefault(x => x.Name == "Powód:").Value.ToString() ?? reason;
-
-                        rEmbedBuilder.Color = warning ? EMType.Success.Color() : EMType.Bot.Color();
-                        rEmbedBuilder.Fields.FirstOrDefault(x => x.Name == "Id zgloszenia:").Value = "Rozpatrzone!";
-                        await SafeReplyAsync("", embed: rEmbedBuilder.Build());
-                    }
-                    catch (Exception ex)
-                    {
-                        Logger?.LogError($"mod: edycja raportu {raport.Id}: {ex.Message}");
-                    }
-
                     await reportMsg.DeleteAsync();
-                }
 
                 config.Raports.Remove(raport);
                 await db.SaveChangesAsync();
 
-                var user = Context.Guild.GetUser(raport.User);
-                if (user == null)
+                // the report is already removed, so its copy goes out even when the penalty fails
+                string decision = null;
+                try
                 {
-                    await SafeReplyAsync("", embed: $"Użytkownika nie ma na serwerze.".ToEmbedMessage(EMType.Error).Build());
-                    return;
-                }
-
-                if (user.Roles.Contains(muteRole) && !warning)
-                {
-                    await SafeReplyAsync("", embed: $"{user.Mention} już jest wyciszony.".ToEmbedMessage(EMType.Error).Build());
-                    return;
-                }
-
-                var usr = Context.User as SocketGuildUser;
-                string byWho = usr.GetUserNickInGuild();
-
-                if (warning)
-                {
-                    var dbUser = await db.GetUserOrCreateSimpleAsync(user.Id);
-
-                    ++dbUser.Warnings;
-
-                    if (dbUser.Warnings < 3)
+                    var user = Context.Guild.GetUser(raport.User);
+                    if (user == null)
                     {
-                        await db.SaveChangesAsync();
-                        await _moderation.NotifyUserAsync(user, reason);
+                        decision = "brak, gracza nie ma na serwerze";
+                        await SafeReplyAsync("", embed: $"Użytkownika nie ma na serwerze.".ToEmbedMessage(EMType.Error).Build());
                         return;
                     }
 
-                    var multiplier = 1;
-                    if (dbUser.Warnings > 15)
+                    if (user.Roles.Contains(muteRole) && !warning)
                     {
-                        multiplier = 30;
-                    }
-                    else if (dbUser.Warnings > 10)
-                    {
-                        multiplier = 10;
-                    }
-                    else if (dbUser.Warnings > 5)
-                    {
-                        multiplier = 2;
+                        decision = "brak, gracz już jest wyciszony";
+                        await SafeReplyAsync("", embed: $"{user.Mention} już jest wyciszony.".ToEmbedMessage(EMType.Error).Build());
+                        return;
                     }
 
-                    byWho = "automat";
-                    duration = 24 * multiplier;
-                    reason = $"przekroczono maksymalną liczbę ostrzeżeń ({dbUser.Warnings})";
+                    string byWho = moderator;
+                    string warningText = null;
+
+                    if (warning)
+                    {
+                        var dbUser = await db.GetUserOrCreateSimpleAsync(user.Id);
+
+                        ++dbUser.Warnings;
+                        warningText = $"ostrzeżenie ({dbUser.Warnings}.)";
+
+                        var alreadyMuted = user.Roles.Contains(muteRole);
+                        if (dbUser.Warnings < 3 || alreadyMuted)
+                        {
+                            await db.SaveChangesAsync();
+                            decision = alreadyMuted ? $"{warningText}, gracz już jest wyciszony" : warningText;
+                            await _moderation.NotifyUserAsync(user, reason, dbUser.Warnings);
+
+                            if (alreadyMuted)
+                                await SafeReplyAsync("", embed: $"{user.Mention} już jest wyciszony, dodano tylko ostrzeżenie ({dbUser.Warnings}).".ToEmbedMessage(EMType.Bot).Build());
+                            return;
+                        }
+
+                        var multiplier = 1;
+                        if (dbUser.Warnings > 15)
+                        {
+                            multiplier = 30;
+                        }
+                        else if (dbUser.Warnings > 10)
+                        {
+                            multiplier = 10;
+                        }
+                        else if (dbUser.Warnings > 5)
+                        {
+                            multiplier = 2;
+                        }
+
+                        byWho = Moderator.AutoAuthor;
+                        duration = 24 * multiplier;
+                        reason = $"przekroczono maksymalną liczbę ostrzeżeń ({dbUser.Warnings})";
+                    }
+
+                    var info = await _moderation.MuteUserAsync(user, muteRole, null, userRole, db, duration, reason);
+                    var mute = $"wyciszenie na {PenaltyFormat.Duration(info.Info.DurationInHours)}";
+                    decision = warningText == null ? mute : $"{warningText} i {mute}";
+                    await _moderation.NotifyAboutPenaltyAsync(user, notifChannel, info, byWho);
+
+                    await SafeReplyAsync("", embed: $"{user.Mention} został {PenaltyFormat.Applied(info)}.".ToEmbedMessage(EMType.Success).Build());
                 }
-
-                var info = await _moderation.MuteUserAsync(user, muteRole, null, userRole, db, duration, reason);
-                await _moderation.NotifyAboutPenaltyAsync(user, notifChannel, info, byWho);
-
-                await SafeReplyAsync("", embed: $"{user.Mention} został wyciszony.".ToEmbedMessage(EMType.Success).Build());
+                finally
+                {
+                    if (report != null)
+                        await SafeReplyAsync("", embed: ReportFormat.Resolve(report, true, decision ?? "błąd, kara nie została nałożona", moderator).Build());
+                }
             }
         }
 
@@ -2125,10 +2112,23 @@ namespace Sanakan.Modules
 
         [Command("scamhash add")]
         [Alias("scamhash dodaj")]
-        [Summary("dodaje sygnatury scamowych obrazków z załącznika lub z wiadomości, na którą odpowiadasz")]
-        [Remarks(""), RequireAnyAdminRoleOrChannelPermission(ChannelPermission.ManageMessages)]
-        public async Task AddScamHashAsync()
+        [Summary("dodaje podany hash albo sygnatury scamowych obrazków z załącznika lub z wiadomości, na którą odpowiadasz")]
+        [Remarks("a1b2c3d4e5f60718"), RequireAnyAdminRoleOrChannelPermission(ChannelPermission.ManageMessages)]
+        public async Task AddScamHashAsync([Summary("hash (16 znaków hex, opcjonalny)")] string hash = null)
         {
+            if (hash != null)
+            {
+                if (!Services.ScamImages.ScamImageStore.TryParseHash(hash, out var parsed))
+                {
+                    await SafeReplyAsync("", embed: "Nieprawidłowy hash. Podaj 16 znaków hex.".ToEmbedMessage(EMType.Error).Build());
+                    return;
+                }
+
+                var addedHash = _scamImages.Store.Add(parsed);
+                await SafeReplyAsync("", embed: (addedHash ? "Dodano sygnaturę scamowego obrazka." : "Taka sygnatura jest już zapisana.").ToEmbedMessage(addedHash ? EMType.Success : EMType.Info).Build());
+                return;
+            }
+
             IReadOnlyCollection<IAttachment> attachments = Context.Message.Attachments;
             if (attachments.Count == 0 && (Context.Message.Reference?.MessageId.IsSpecified ?? false))
             {
@@ -2141,12 +2141,12 @@ namespace Sanakan.Modules
                 _scamImageExtensions.Any(e => x.Filename.EndsWith(e, StringComparison.OrdinalIgnoreCase))).ToList();
             if (images.Count == 0)
             {
-                await SafeReplyAsync("", embed: "Dołącz obrazek jako załącznik albo odpowiedz na wiadomość z obrazkami.".ToEmbedMessage(EMType.Error).Build());
+                await SafeReplyAsync("", embed: "Podaj hash (16 znaków hex), dołącz obrazek jako załącznik albo odpowiedz na wiadomość z obrazkami.".ToEmbedMessage(EMType.Error).Build());
                 return;
             }
 
             var added = await _scamImages.AddFromAttachmentsAsync(images);
-            await SafeReplyAsync("", embed: $"Dodano **{added}** nowych sygnatur scamowych obrazków.".ToEmbedMessage(added > 0 ? EMType.Success : EMType.Info).Build());
+            await SafeReplyAsync("", embed: $"Dodano **{added}** {Polish.Plural(added, "nową sygnaturę", "nowe sygnatury", "nowych sygnatur")} scamowych obrazków.".ToEmbedMessage(added > 0 ? EMType.Success : EMType.Info).Build());
         }
 
         [Command("scamhash remove")]
@@ -2206,7 +2206,7 @@ namespace Sanakan.Modules
                         }
                     }
 
-                    await SafeReplyAsync(_helper.GiveHelpAboutPrivateCmd("Moderacja", command, prefix));
+                    await SafeReplyAsync("", embed: _helper.GiveHelpAboutPrivateCmd("Moderacja", command, prefix));
                 }
                 catch (Exception ex)
                 {

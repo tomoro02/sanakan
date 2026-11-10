@@ -11,7 +11,6 @@ using Sanakan.Services.Commands;
 using Sanakan.Services.Session;
 using Sanakan.Services.Session.Models;
 using Sanakan.Services.Time;
-using Shinden.Logger;
 using System;
 using System.Linq;
 using System.Threading.Tasks;
@@ -47,10 +46,12 @@ namespace Sanakan.Modules
         private ISystemTime _time;
         private ILogger _logger;
         private IConfig _config;
+        private Api.HealthMonitor _health;
 
         public Helper(Services.Helper helper, Services.Moderator moderation, SessionManager session, Services.Profile profile,
-            ILogger logger, IConfig config, Services.PocketWaifu.Waifu  waifu, ISystemTime time, ImageProcessing img)
+            ILogger logger, IConfig config, Services.PocketWaifu.Waifu  waifu, ISystemTime time, ImageProcessing img, Api.HealthMonitor health)
         {
+            _health = health;
             _moderation = moderation;
             _profile = profile;
             _session = session;
@@ -91,7 +92,7 @@ namespace Sanakan.Modules
                         }
                     }
 
-                    await SafeReplyAsync(_helper.GiveHelpAboutPublicCmd(command, prefix, admin, dev));
+                    await SafeReplyAsync("", embed: _helper.GiveHelpAboutPublicCmd(command, prefix, admin, dev));
                 }
                 catch (Exception ex)
                 {
@@ -101,7 +102,17 @@ namespace Sanakan.Modules
                 return;
             }
 
-            await SafeReplyAsync(_helper.GivePublicHelp());
+            string listPrefix = _config.Get().Prefix;
+            if (Context.Guild != null)
+            {
+                using (var db = new Database.DatabaseContext(_config))
+                {
+                    var gConfig = await db.GetCachedGuildFullConfigAsync(Context.Guild.Id);
+                    if (gConfig?.Prefix != null) listPrefix = gConfig.Prefix;
+                }
+            }
+
+            await SafeReplyAsync(_helper.GivePublicHelp(listPrefix));
         }
 
         [Command("ktoto", RunMode = RunMode.Async)]
@@ -171,20 +182,27 @@ namespace Sanakan.Modules
         [Remarks("")]
         public async Task GiveBotInfoAsync()
         {
-            using (var proc = System.Diagnostics.Process.GetCurrentProcess())
+            var prefix = _config.Get().Prefix;
+            if (Context.Guild != null)
             {
-                var info = new System.Text.StringBuilder()
-                .AppendLine($"**Sanakan ({typeof(Sanakan).Assembly.GetName().Version})**:")
-                .AppendLine($"**Czas działania**: `{_time.Now() - proc.StartTime:d'd 'hh\\:mm\\:ss}`")
-                .AppendLine()
-                .Append("[Strona](https://sanakan.pl/) | ")
-                .Append("[GitHub](https://github.com/MZKNEK/sanakan.git) | ")
-                .Append("[Wiki](https://wiki.sanakan.pl/) | ")
-                .Append("[Karty](https://waifu.sanakan.pl/#/) | ")
-                .Append("[Alter](https://alter.sanakan.pl/)");
-
-                await SafeReplyAsync("", embed: info.ToString().ToEmbedMessage(EMType.Bot).Build());
+                using (var db = new Database.DatabaseContext(_config))
+                {
+                    var gConfig = await db.GetCachedGuildFullConfigAsync(Context.Guild.Id);
+                    if (gConfig?.Prefix != null) prefix = gConfig.Prefix;
+                }
             }
+
+            Api.Models.HealthStatus health = null;
+            try
+            {
+                health = await _health.GetAsync();
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError($"Info: health: {ex.Message}");
+            }
+
+            await SafeReplyAsync("", embed: BotInfoFormat.Build(health, prefix, Context.Guild != null), components: BotInfoFormat.Links(health?.Version ?? Api.HealthMonitor.GetVersion()));
         }
 
         [Command("można dostać?", RunMode = RunMode.Async)]
@@ -196,7 +214,7 @@ namespace Sanakan.Modules
             using (var db = new Database.DatabaseContext(Config))
             {
                 var botuser = await db.GetUserOrCreateSimpleAsync(Context.User.Id);
-                var charInfo = _waifu.IsInPool(botuser.PoolType, id);
+                var charInfo = await _waifu.IsInPoolAsync(botuser.PoolType, id);
 
                 string moreInfo = charInfo is null ? $"{id} nie znajduje się w puli."
                  : $"{charInfo} znajduje się w puli.";
@@ -388,7 +406,15 @@ namespace Sanakan.Modules
                     return;
                 }
 
-                _ = await _img.SaveCardBorderImageFromUrlAsync(imgCheck.Url, thisCard);
+                try
+                {
+                    _ = await _img.SaveCardBorderImageFromUrlAsync(imgCheck.Url, thisCard);
+                }
+                catch (Exception)
+                {
+                    await SafeReplyAsync("", embed: $"{Context.User.Mention} nie udało się zapisać obrazka ramki.".ToEmbedMessage(EMType.Error).Build());
+                    return;
+                }
 
                 await db.SaveChangesAsync();
 
@@ -471,7 +497,15 @@ namespace Sanakan.Modules
                     return;
                 }
 
-                _ = await _img.SaveCardImageFromUrlAsync(imgCheck.Url, thisCard);
+                try
+                {
+                    _ = await _img.SaveCardImageFromUrlAsync(imgCheck.Url, thisCard);
+                }
+                catch (Exception)
+                {
+                    await SafeReplyAsync("", embed: $"{Context.User.Mention} nie udało się zapisać obrazka.".ToEmbedMessage(EMType.Error).Build());
+                    return;
+                }
 
                 thisCard.FixedCustomImageCnt++;
                 thisCard.CustomImageDate = _time.Now();
@@ -587,12 +621,12 @@ namespace Sanakan.Modules
 
                 await SafeReplyAsync("", embed: "Wysłano zgłoszenie.".ToEmbedMessage(EMType.Success).Build());
 
-                string userName = $"{Context.User.Username}({Context.User.Id})";
-                var sendMsg = await raportCh.SendMessageAsync($"{repMsg.GetJumpUrl()}", embed: "prep".ToEmbedMessage().Build());
+                string userName = $"{Context.User.Username} ({Context.User.Id})";
+                var sendMsg = await raportCh.SendMessageAsync("", embed: "prep".ToEmbedMessage().Build());
 
                 try
                 {
-                    await sendMsg.ModifyAsync(x => x.Embed = _helper.BuildRaportInfo(repMsg, userName, reason, sendMsg.Id));
+                    await sendMsg.ModifyAsync(x => x.Embed = ReportFormat.Build(repMsg, userName, reason, sendMsg.Id));
 
                     var rConfig = await db.GetGuildConfigOrCreateAsync(Context.Guild.Id);
                     rConfig.Raports.Add(new Database.Models.Configuration.Raport { User = repMsg.Author.Id, Message = sendMsg.Id });
@@ -600,7 +634,7 @@ namespace Sanakan.Modules
                 }
                 catch (Exception ex)
                 {
-                    _logger.LogError($"in raport: {ex}");
+                    _logger.LogError($"Mod: user report: {ex}");
                     await sendMsg.DeleteAsync();
                 }
             }

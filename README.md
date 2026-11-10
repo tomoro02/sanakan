@@ -9,8 +9,9 @@ Sanakan is a Discord bot and web API built with [.NET 6](https://dotnet.microsof
 ## Requirements
 
 - [.NET 6 SDK](https://dotnet.microsoft.com/download/dotnet/6.0)
-- MySQL-compatible database
-- A Shinden API key
+- MySQL-compatible database, or SQLite (no separate server needed)
+- A Shinden API application token (`shk_…`) and, for operations not yet
+  moved to the new API, the legacy Shinden API key
 - A Discord bot token
 - `make` for the Makefile commands
 
@@ -37,11 +38,13 @@ comments to it.
   "Demonization": false,
   "SafariEnabled": false,
   "AutoCleanCards": false,
+  "DatabaseProvider": "MySql",
   "ConnectionString": "Server=localhost;Port=3306;Database=sanakan;User ID=sanakan;Password=your-password;",
   "CharPerPacket": 20000,
   "PacksPerDay": 0,
   "Shinden": {
-    "Token": "your-shinden-api-key",
+    "ApiToken": "your-shinden-application-token",
+    "Token": "your-shinden-legacy-api-key",
     "UserAgent": "your-user-agent"
   },
   "Exp": {
@@ -57,24 +60,21 @@ comments to it.
     "Issuer": "your-issuer"
   },
   "GiveBanForUrlSpam": false,
-  "ApiKeys": [
-    {
-      "Key": "your-api-key",
-      "Bearer": "your-bearer-name"
-    }
-  ],
   "UserKeyApps": [
+    {
+      "Key": "your-site-key",
+      "Bearer": "your-site-name",
+      "Permissions": "Site"
+    },
     {
       "Key": "your-app-key",
       "Bearer": "your-app-name"
     }
   ],
-  "RMConfig": [
+  "AdminNotifyChannels": [
     {
-      "RoleId": 123456789012345678,
       "GuildId": 123456789012345678,
-      "ChannelId": 123456789012345678,
-      "Type": "News"
+      "ChannelId": 123456789012345678
     }
   ],
   "BlacklistedGuilds": [
@@ -82,6 +82,25 @@ comments to it.
   ]
 }
 ```
+
+To use SQLite instead of MySQL, set the provider and point the connection
+string at a database file:
+
+```json
+  "DatabaseProvider": "Sqlite",
+  "ConnectionString": "Data Source=sanakan.db",
+```
+
+A relative path is resolved against the working directory. The database
+schema is created on the first start for both providers. Data is not moved
+between providers automatically. SQLite runs in WAL mode, so recent changes
+may still be in the `-wal` file next to the database: back up all files
+together, or only while the bot is stopped.
+
+On SQLite the bot compares text like MySQL's default collation, ignoring
+case and accents. External SQLite tools do not know these rules, so change
+text columns only through the bot, or run `REINDEX NOCASE;` after editing
+them elsewhere.
 
 Keep `Config.json` out of source control. It contains bot credentials,
 database credentials, and API keys. The repository's `.gitignore` should be

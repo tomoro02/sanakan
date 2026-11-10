@@ -9,7 +9,6 @@ using System.Threading.Tasks;
 using Discord;
 using Discord.WebSocket;
 using Microsoft.EntityFrameworkCore;
-using Microsoft.Extensions.Caching.Memory;
 using Moq;
 using Sanakan.Api.Controllers;
 using Sanakan.Config.Model;
@@ -82,7 +81,7 @@ namespace Artifacts
         {
             var executor = new FakeExecutor { Accept = false };
             var controller = ControllerHarness.Attach(new WaifuController(null, null, executor, null, new FakeConfig(), new FixedTime(),
-                new MemoryCache(new MemoryCacheOptions()), null, null));
+                new Sanakan.Services.Shinden(null, null, null, new ListLogger(), new FixedTime()), null, null, null));
 
             var result = await controller.UpdateCardInfoAsync(5, new Sanakan.Api.Models.CharacterCardInfoUpdate());
 
@@ -354,28 +353,6 @@ namespace Artifacts
         }
     }
 
-    public class QuizQueryTests
-    {
-        [Fact]
-        public void QuestionWithAnswers_IsValidQuery()
-        {
-            var config = new FakeConfig();
-            config.Model.ConnectionString = "Server=127.0.0.1;Database=test;Uid=test;Pwd=test;";
-
-            using var db = new Sanakan.Database.DatabaseContext(config);
-            var sql = db.Questions.Include(x => x.Answers).Where(x => x.Id == 1).ToQueryString();
-
-            Assert.Contains("Answers", sql);
-        }
-
-        [Fact]
-        public void QuizController_DoesNotIncludeScalarAnswer()
-        {
-            var source = File.ReadAllText(Path.Combine(RepoPaths.Src, "Api", "Controllers", "QuizController.cs"));
-            Assert.DoesNotMatch(new Regex(@"Include\(x => x\.Answer\)"), source);
-        }
-    }
-
     public class UpgradeSacrificeTests
     {
         private static Card Target() => new Card { Id = 1, Tags = new List<Tag>() };
@@ -412,7 +389,7 @@ namespace Artifacts
     {
         private static WaifuController NewController(FakeExecutor executor)
             => ControllerHarness.Attach(new WaifuController(null, null, executor, null, new FakeConfig(), new FixedTime(),
-                new MemoryCache(new MemoryCacheOptions()), null, null));
+                new Sanakan.Services.Shinden(null, null, null, new ListLogger(), new FixedTime()), null, null, null));
 
         [Fact]
         public async Task GivePacks_NullBody_Returns500WithoutException()
@@ -439,95 +416,15 @@ namespace Artifacts
 
     public class RegisterUserTests
     {
-        private static Shinden.Models.IUserSearch Found(ulong id, string name)
-        {
-            var mock = new Mock<Shinden.Models.IUserSearch>();
-            mock.SetupGet(x => x.Id).Returns(id);
-            mock.SetupGet(x => x.Name).Returns(name);
-            return mock.Object;
-        }
-
         [Fact]
-        public void PickUser_PrefersExactName()
-        {
-            var picked = UserController.PickShindenUser(new[] { Found(1, "Karnaval"), Found(2, "karna") }, "Karna");
-            Assert.Equal(2ul, picked.Id);
-        }
-
-        [Fact]
-        public void PickUser_FallsBackToFirstResult()
-        {
-            Assert.Equal(1ul, UserController.PickShindenUser(new[] { Found(1, "Karnaval"), Found(2, "Karnus") }, "Karna").Id);
-        }
-
-        [Fact]
-        public void PickUser_EmptyOrNull_ReturnsNull()
-        {
-            Assert.Null(UserController.PickShindenUser(new Shinden.Models.IUserSearch[0], "Karna"));
-            Assert.Null(UserController.PickShindenUser(null, "Karna"));
-        }
-
-        [Fact]
-        public async Task Register_NullModel_Returns500()
+        public async Task Register_NullModel_Returns400()
         {
             var controller = ControllerHarness.Attach(new UserController(null, null, new ListLogger(), new FakeExecutor(),
-                new FakeConfig(), new FixedTime(), new MemoryCache(new MemoryCacheOptions())));
+                new FakeConfig(), new FixedTime(), new Sanakan.Services.Shinden(null, null, null, new ListLogger(), new FixedTime()), null, null));
 
             var result = await controller.RegisterUserAsync(null);
 
-            Assert.Equal(500, result.StatusOf());
-        }
-    }
-
-    public class RichMessageTests
-    {
-        private static RichMessageController NewController(params RichMessageConfig[] configs)
-        {
-            var config = new FakeConfig();
-            config.Model.RMConfig = configs.ToList();
-            return ControllerHarness.Attach(new RichMessageController(new DiscordSocketClient(), config, new ListLogger()));
-        }
-
-        [Fact]
-        public async Task Delete_UnknownMessage_Returns404()
-        {
-            var controller = NewController(new RichMessageConfig { GuildId = 1, ChannelId = 2 });
-
-            var result = await controller.DeleteRichMessageAsync(123);
-
-            Assert.Equal(404, result.StatusOf());
-        }
-
-        [Fact]
-        public async Task Delete_BrokenWebhook_DoesNotStopOtherTargets()
-        {
-            var controller = NewController(
-                new RichMessageConfig { WebHookUrl = "not-a-webhook" },
-                new RichMessageConfig { GuildId = 1, ChannelId = 2 });
-
-            var result = await controller.DeleteRichMessageAsync(123);
-
-            Assert.Equal(404, result.StatusOf());
-        }
-
-        [Fact]
-        public async Task Modify_UnknownMessage_Returns404()
-        {
-            var controller = NewController(new RichMessageConfig { WebHookUrl = "not-a-webhook" });
-
-            var result = await controller.ModifyeRichMessageAsync(123, new Sanakan.Api.Models.RichMessage().Example());
-
-            Assert.Equal(404, result.StatusOf());
-        }
-
-        [Fact]
-        public async Task Delete_WithoutConfig_Returns404()
-        {
-            var controller = NewController();
-
-            var result = await controller.DeleteRichMessageAsync(123);
-
-            Assert.Equal(404, result.StatusOf());
+            Assert.Equal(400, result.StatusOf());
         }
     }
 

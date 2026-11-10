@@ -8,10 +8,10 @@ using Discord;
 using Discord.Commands;
 using Discord.WebSocket;
 using Sanakan.Config;
+using Sanakan.Database.Models;
 using Sanakan.Extensions;
 using Sanakan.Services.PocketWaifu;
 using Sanakan.Services.Time;
-using Z.EntityFramework.Plus;
 
 namespace Sanakan.Services.Session.Models
 {
@@ -22,13 +22,20 @@ namespace Sanakan.Services.Session.Models
             Add, AcceptP1, AcceptP2, End
         }
 
+        public enum ExchangeOutcome
+        {
+            None, Done, Declined, Cancelled, Expired
+        }
+
+        private const string CancelledPrefix = "Wymiana anulowana: ";
+
         public IMessage Message { get; set; }
         public PlayerInfo P1 { get; set; }
         public PlayerInfo P2 { get; set; }
-        public string Name { get; set; }
-        public string Tips { get; set; }
 
         private ExchangeStatus State;
+        private ExchangeOutcome Outcome = ExchangeOutcome.None;
+        private string OutcomeText;
         private ISystemTime _time;
         private TagHelper _tags;
         private IConfig _config;
@@ -73,11 +80,56 @@ namespace Sanakan.Services.Session.Models
 
         public Embed BuildEmbed()
         {
-            return new EmbedBuilder
+            var adding = State == ExchangeStatus.Add && Outcome == ExchangeOutcome.None;
+            var description = $"{BuildProposition(P1, adding)}\n\n{BuildProposition(P2, adding)}";
+            if (!string.IsNullOrEmpty(OutcomeText))
+                description += $"\n\n{OutcomeText}";
+
+            var embed = new EmbedBuilder
             {
-                Color = EMType.Warning.Color(),
-                Description = $"{Name}\n\n{P1.CustomString}\n\n{P2.CustomString}\n\n{Tips}".TrimToLength()
-            }.Build();
+                Title = Title(Outcome, State == ExchangeStatus.Add),
+                Color = OutcomeColor(Outcome, State == ExchangeStatus.Add),
+                Description = description.TrimToLength(),
+            };
+
+            if (Outcome != ExchangeOutcome.None)
+                return embed.Build();
+
+            if (adding)
+            {
+                embed.AddField("Jak to działa", "Na tym kanale: `dodaj WID [WID…]`, `usuń WID`, `oznacz tag`\n"
+                    + $"{OneEmote} {P1.User.Mention} kończy dodawanie\n{TwoEmote} {P2.User.Mention} kończy dodawanie");
+            }
+            else
+            {
+                var turn = State == ExchangeStatus.AcceptP1 ? P1 : P2;
+                embed.AddField("Teraz kolej na", $"{turn.User.Mention}: kliknij {AcceptEmote}, żeby zaakceptować, albo {DeclineEmote}, żeby odrzucić.");
+            }
+
+            return embed.WithFooter("Wymiana wygasa po 2 minutach bez aktywności").Build();
+        }
+
+        public static string Title(ExchangeOutcome outcome, bool adding) => outcome switch
+        {
+            ExchangeOutcome.Done => "✅ Wymiana zakończona",
+            ExchangeOutcome.Declined => "❌ Wymiana odrzucona",
+            ExchangeOutcome.Cancelled => "⚠️ Wymiana anulowana",
+            ExchangeOutcome.Expired => "⌛ Wymiana wygasła",
+            _ => adding ? "🔄 Wymiana" : "🔄 Wymiana: potwierdzenie",
+        };
+
+        public static Color OutcomeColor(ExchangeOutcome outcome, bool adding) => outcome switch
+        {
+            ExchangeOutcome.Done => new Color(59, 165, 93),
+            ExchangeOutcome.Cancelled => new Color(229, 72, 77),
+            ExchangeOutcome.Declined or ExchangeOutcome.Expired => new Color(128, 132, 142),
+            _ => adding ? new Color(232, 197, 71) : new Color(91, 141, 239),
+        };
+
+        public static string CancelReason(string error)
+        {
+            var reason = error.StartsWith(CancelledPrefix, StringComparison.Ordinal) ? error.Substring(CancelledPrefix.Length) : error;
+            return reason.Length > 0 ? char.ToUpperInvariant(reason[0]) + reason.Substring(1) : reason;
         }
 
         private async Task HandleMessageAsync(SessionContext context)
@@ -202,7 +254,6 @@ namespace Sanakan.Services.Session.Models
             }
 
             player.Accepted = false;
-            player.CustomString = BuildProposition(player);
 
             if (added) await message.AddReactionAsync(InEmote);
             if (error) await message.AddReactionAsync(ErrEmote);
@@ -227,7 +278,6 @@ namespace Sanakan.Services.Session.Models
 
             player.Accepted = false;
             player.Cards.Remove(card);
-            player.CustomString = BuildProposition(player);
 
             await message.AddReactionAsync(OutEmote);
 
@@ -237,12 +287,18 @@ namespace Sanakan.Services.Session.Models
             }
         }
 
-        public string BuildProposition(PlayerInfo player)
+        public static string BuildProposition(PlayerInfo player, bool showFinished)
         {
-            if (player.Cards.Count > 12)
-                return $"{player.User.Mention} oferuje:\n\n**[{player.Cards.Count}]** kart";
+            var header = $"{(showFinished && player.Accepted ? "✅ " : "")}{player.User.Mention} oferuje:";
 
-            return $"{player.User.Mention} oferuje:\n{string.Join("\n", player.Cards.Select(x => x.GetString(false, false, true)))}";
+            if (player.Cards.Count == 0)
+                return $"{header}\n*nic*";
+
+            if (player.Cards.Count > 12)
+                return $"{header}\n**{Polish.Count(player.Cards.Count, "kartę", "karty", "kart")}**";
+
+            // no stat emoji: two full offers would pass the ~100 markdown elements Discord renders
+            return $"{header}\n{string.Join("\n", player.Cards.Select(x => x.GetString(false, false, true, hideStats: true)))}";
         }
 
         private async Task<bool> HandleReactionAsync(SessionContext context)
@@ -281,13 +337,16 @@ namespace Sanakan.Services.Session.Models
 
         private async Task HandleReactionInAdd(SocketReaction reaction, IUserMessage msg)
         {
+            var finished = false;
             if (reaction.Emote.Equals(OneEmote) && reaction.UserId == P1.User.Id)
             {
+                finished = !P1.Accepted;
                 P1.Accepted = true;
                 RestartTimer();
             }
             else if (reaction.Emote.Equals(TwoEmote) && reaction.UserId == P2.User.Id)
             {
+                finished = !P2.Accepted;
                 P2.Accepted = true;
                 RestartTimer();
             }
@@ -295,11 +354,14 @@ namespace Sanakan.Services.Session.Models
             if (P1.Accepted && P2.Accepted)
             {
                 State = ExchangeStatus.AcceptP1;
-                Tips = $"{P1.User.Mention} daj {AcceptEmote} aby zaakceptować, lub {DeclineEmote} aby odrzucić.";
 
                 await msg.RemoveAllReactionsAsync();
                 await msg.ModifyAsync(x => x.Embed = BuildEmbed());
                 await msg.AddReactionsAsync(new IEmote[] { AcceptEmote, DeclineEmote });
+            }
+            else if (finished)
+            {
+                await msg.ModifyAsync(x => x.Embed = BuildEmbed());
             }
         }
 
@@ -317,54 +379,30 @@ namespace Sanakan.Services.Session.Models
                         msgCh = true;
                         RestartTimer();
                         State = ExchangeStatus.AcceptP2;
-                        Tips = $"{P2.User.Mention} daj {AcceptEmote} aby zaakceptować, lub {DeclineEmote} aby odrzucić.";
                     }
                     else if (State == ExchangeStatus.AcceptP2)
                     {
-                        Tips = $"Wymiana zakończona!";
+                        string error = null;
+                        if (P1.Cards.Count > 0 || P2.Cards.Count > 0)
+                        {
+                            using (var db = new Database.DatabaseContext(_config))
+                            {
+                                error = await FinalizeExchangeAsync(db);
+                            }
+                        }
+
+                        Outcome = error == null ? ExchangeOutcome.Done : ExchangeOutcome.Cancelled;
+                        OutcomeText = error == null ? null : CancelReason(error);
+                        State = ExchangeStatus.End;
                         msgCh = true;
                         end = true;
-
-                        if (P1.Cards.Count == 0 && P2.Cards.Count == 0)
-                            return end;
-
-                        using (var db = new Database.DatabaseContext(_config))
-                        {
-                            var user1 = await db.GetUserOrCreateAsync(P1.User.Id);
-                            var user2 = await db.GetUserOrCreateAsync(P2.User.Id);
-
-                            var u1Data = (user1, P1.Cards.Count > 0 ? P1.Cards.Count : 1, await db.GetTagAsync(_tags, P1.Tag, P1.User.Id), P1.User.GetUserNickInGuild());
-                            var u2Data = (user2, P2.Cards.Count > 0 ? P2.Cards.Count : 1, await db.GetTagAsync(_tags, P2.Tag, P2.User.Id), P2.User.GetUserNickInGuild());
-
-                            foreach (var c in P1.Cards)
-                            {
-                                var card = user1.GetCard(c.Id);
-                                if (card != null)
-                                {
-                                    await card.ExchangeWithAsync(u1Data, u2Data, db, _time);
-                                }
-                            }
-
-                            foreach (var c in P2.Cards)
-                            {
-                                var card = user2.GetCard(c.Id);
-                                if (card != null)
-                                {
-                                    await card.ExchangeWithAsync(u2Data, u1Data, db, _time);
-                                }
-                            }
-
-                            await db.SaveChangesAsync();
-
-                            State = ExchangeStatus.End;
-                            QueryCacheManager.ExpireTag(new string[] { CacheTags.User(P1.User.Id), CacheTags.User(P2.User.Id) });
-                        }
                     }
                 }
                 else if (reaction.Emote.Equals(DeclineEmote) && State != ExchangeStatus.End)
                 {
                     RestartTimer();
-                    Tips = $"{player.User.Mention} odrzucił propozycję wymiany!";
+                    Outcome = ExchangeOutcome.Declined;
+                    OutcomeText = $"{player.User.Mention} odrzucił propozycję.";
                     msgCh = true;
                     end = true;
                 }
@@ -372,6 +410,48 @@ namespace Sanakan.Services.Session.Models
                 if (msg != null && msgCh) await msg.ModifyAsync(x => x.Embed = BuildEmbed());
             }
             return end;
+        }
+
+        private bool CanTransfer(Card card, User target)
+        {
+            if (card == null)
+                return false;
+
+            _ = card.RecoverFatigue(_time);
+            return !card.IsDisallowedToExchange()
+                && !(card.Dere == Dere.Yami && target.GameDeck.IsGood())
+                && !(card.Dere == Dere.Raito && target.GameDeck.IsEvil());
+        }
+
+        private async Task<string> FinalizeExchangeAsync(Database.DatabaseContext db)
+        {
+            var user1 = await db.GetUserOrCreateAsync(P1.User.Id);
+            var user2 = await db.GetUserOrCreateAsync(P2.User.Id);
+            var cards1 = P1.Cards.Select(c => user1.GetCard(c.Id)).ToList();
+            var cards2 = P2.Cards.Select(c => user2.GetCard(c.Id)).ToList();
+
+            if (user1.IsBlacklisted || user2.IsBlacklisted)
+                return "Wymiana anulowana: jeden z graczy znajduje się na czarnej liście.";
+
+            if (cards1.Any(c => !CanTransfer(c, user2)) || cards2.Any(c => !CanTransfer(c, user1)))
+                return "Wymiana anulowana: co najmniej jedna z oferowanych kart nie może już zostać wymieniona.";
+
+            if ((long)user1.GameDeck.Cards.Count - cards1.Count + cards2.Count > user1.GameDeck.MaxNumberOfCards
+                || (long)user2.GameDeck.Cards.Count - cards2.Count + cards1.Count > user2.GameDeck.MaxNumberOfCards)
+                return "Wymiana anulowana: jeden z graczy nie ma wystarczająco miejsca na otrzymywane karty.";
+
+            var u1Data = (user1, Math.Max(cards1.Count, 1), await db.GetTagAsync(_tags, P1.Tag, P1.User.Id), P1.User.GetUserNickInGuild());
+            var u2Data = (user2, Math.Max(cards2.Count, 1), await db.GetTagAsync(_tags, P2.Tag, P2.User.Id), P2.User.GetUserNickInGuild());
+
+            foreach (var card in cards1)
+                await card.ExchangeWithAsync(u1Data, u2Data, db, _time);
+
+            foreach (var card in cards2)
+                await card.ExchangeWithAsync(u2Data, u1Data, db, _time);
+
+            await db.SaveChangesAsync();
+            QueryCache.ExpireTag(new string[] { CacheTags.User(P1.User.Id), CacheTags.User(P2.User.Id) });
+            return null;
         }
 
         private async Task DisposeAction()
@@ -382,14 +462,19 @@ namespace Sanakan.Services.Session.Models
                 {
                     try
                     {
+                        if (Outcome == ExchangeOutcome.None && P1 != null && P2 != null)
+                        {
+                            Outcome = ExchangeOutcome.Expired;
+                            OutcomeText = "Przez 2 minuty nikt nic nie zrobił. Karty zostały u właścicieli.";
+                            await msg.ModifyAsync(x => x.Embed = BuildEmbed());
+                        }
+
                         await msg.RemoveAllReactionsAsync();
                     }
                     catch (Exception) { }
                 }
 
                 Message = null;
-                Name = null;
-                Tips = null;
                 P1 = null;
                 P2 = null;
             }

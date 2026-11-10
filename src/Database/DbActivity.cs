@@ -6,7 +6,6 @@ using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Diagnostics;
-using Shinden.Logger;
 
 namespace Sanakan.Database
 {
@@ -38,7 +37,7 @@ namespace Sanakan.Database
             _timer = new Timer(_ =>
             {
                 var report = Flush();
-                if (report != null) logger.Log(report);
+                if (report != null) logger.LogReport(report);
             }, null, interval, interval);
         }
 
@@ -56,8 +55,8 @@ namespace Sanakan.Database
             if (queries == 0 && writes == 0 && saves == 0)
                 return null;
 
-            return $"DB ({seconds / 60:0}min): zapytania {queries} ({queries / seconds:0.0}/s), "
-                + $"zapisy {saves} ({saves / seconds:0.0}/s, encji {entities}), komendy zapisujące {writes}";
+            return System.FormattableString.Invariant($"DB ({seconds / 60:0} min): {queries} queries ({queries / seconds:0.0}/s), ")
+                + System.FormattableString.Invariant($"{saves} saves ({saves / seconds:0.0}/s, {entities} entities), {writes} write commands");
         }
 
         public static string FlushDaily()
@@ -67,7 +66,7 @@ namespace Sanakan.Database
             var saves = Interlocked.Exchange(ref _daySaves, 0);
             var entities = Interlocked.Exchange(ref _daySavedEntities, 0);
 
-            return $"DB: zapytania {queries}, zapisy {saves} (encji {entities}), komendy zapisujące {writes}";
+            return $"DB: {queries} queries, {saves} saves ({entities} entities), {writes} write commands";
         }
 
         public static long? GetRecentLatencyMs() => _recent.Get();

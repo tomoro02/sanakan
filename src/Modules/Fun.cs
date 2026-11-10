@@ -15,7 +15,6 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Threading.Tasks;
-using Z.EntityFramework.Plus;
 using Sanakan.Services.Time;
 
 namespace Sanakan.Modules
@@ -74,7 +73,7 @@ namespace Sanakan.Modules
 
                 await db.SaveChangesAsync();
 
-                QueryCacheManager.ExpireTag(new string[] { CacheTags.User(botuser.Id) });
+                QueryCache.ExpireTag(new string[] { CacheTags.User(botuser.Id) });
 
                 await SafeReplyAsync("", embed: $"{Context.User.Mention} łap drobne na waciki!".ToEmbedMessage(EMType.Success).Build());
             }
@@ -83,7 +82,7 @@ namespace Sanakan.Modules
         [Command("daleko jeszcze?", RunMode = RunMode.Async)]
         [Alias("ilejeszczemuszespamicbydostactenzasranypakiet", "ijmsbdtzp", "how much to next packet")]
         [Summary("wyświetla ile pozostało znaków do otrzymania pakietu")]
-        [Remarks("Karna"), RequireAnyCommandChannelOrLevel(60), DelayNextUseBy(120, DelayNextUseBy.ResType.Nothing)]
+        [Remarks("Karna"), RequireAnyCommandChannelOrLevel(60), DelayNextUseBy(120)]
         public async Task ShowHowMuchToPacketAsync([Summary("nazwa użytkownika")]SocketUser user = null)
         {
             var usr = user ?? Context.User;
@@ -92,7 +91,7 @@ namespace Sanakan.Modules
             using (var db = new Database.DatabaseContext(Config))
             {
                 long howMuch = Services.Fun.TakeATry(50d) ? Services.Fun.GetRandomValue(1, 5000) : _spawn.HowMuchToPacket(usr.Id);
-                await SafeReplyAsync("", embed: $"{usr.Mention} potrzebuje **{howMuch}** znaków do następnego pakietu*(teoretycznie)*."
+                await SafeReplyAsync("", embed: $"{usr.Mention} potrzebuje **{howMuch}** {Polish.Plural(howMuch, "znak", "znaki", "znaków")} do następnego pakietu *(teoretycznie)*."
                     .ToEmbedMessage(EMType.Info).Build());
             }
         }
@@ -186,7 +185,7 @@ namespace Sanakan.Modules
 
                 await db.SaveChangesAsync();
 
-                QueryCacheManager.ExpireTag(new string[] { CacheTags.User(botuser.Id) });
+                QueryCache.ExpireTag(new string[] { CacheTags.User(botuser.Id) });
 
                 await SafeReplyAsync("", embed: $"{Context.User.Mention} łap piątaka!".ToEmbedMessage(EMType.Success).Build());
             }
@@ -256,9 +255,9 @@ namespace Sanakan.Modules
 
                 await db.SaveChangesAsync();
 
-                QueryCacheManager.ExpireTag(new string[] { CacheTags.User(botuser.Id) });
+                QueryCache.ExpireTag(new string[] { CacheTags.User(botuser.Id) });
 
-                embed.ImageUrl = $"https://sanakan.pl/i/coin{(int)thrown}.png";
+                embed.ImageUrl = $"https://sanakan.pl/i/coin{(int)thrown}.webp";
                 await SafeReplyAsync("", embed: embed.Build());
             }
         }
@@ -286,7 +285,7 @@ namespace Sanakan.Modules
 
                 await db.SaveChangesAsync();
 
-                QueryCacheManager.ExpireTag(new string[] { CacheTags.User(botuser.Id) });
+                QueryCache.ExpireTag(new string[] { CacheTags.User(botuser.Id) });
             }
 
             await SafeReplyAsync("", embed: $"{Context.User.Mention} zmienił nastawy automatu.".ToEmbedMessage(EMType.Success).Build());
@@ -320,7 +319,7 @@ namespace Sanakan.Modules
 
                 await db.SaveChangesAsync();
 
-                QueryCacheManager.ExpireTag(new string[] { CacheTags.User(botuser.Id) });
+                QueryCache.ExpireTag(new string[] { CacheTags.User(botuser.Id) });
 
                 await SafeReplyAsync("", embed: $"{_fun.GetSlotMachineResult(machine.Draw(), Context.User, botuser, win)}".ToEmbedMessage(EMType.Bot).Build());
             }
@@ -340,7 +339,7 @@ namespace Sanakan.Modules
 
             if (user.Id == Context.User.Id)
             {
-                await SafeReplyAsync("", embed: "Coś tutaj nie gra.".ToEmbedMessage(EMType.Error).Build());
+                await SafeReplyAsync("", embed: $"{Context.User.Mention} nie możesz podarować SC samemu sobie.".ToEmbedMessage(EMType.Error).Build());
                 return;
             }
 
@@ -357,7 +356,7 @@ namespace Sanakan.Modules
 
                 if (thisUser.ScCnt < value)
                 {
-                    await SafeReplyAsync("", embed: $"{Context.User.Mention} nie masz wystarczającej ilości SC.".ToEmbedMessage(EMType.Error).Build());
+                    await SafeReplyAsync("", embed: $"{Context.User.Mention} nie masz wystarczającej liczby SC.".ToEmbedMessage(EMType.Error).Build());
                     return;
                 }
 
@@ -368,57 +367,10 @@ namespace Sanakan.Modules
 
                 await db.SaveChangesAsync();
 
-                QueryCacheManager.ExpireTag(new string[] { CacheTags.User(thisUser.Id), CacheTags.User(targetUser.Id) });
+                QueryCache.ExpireTag(new string[] { CacheTags.User(thisUser.Id), CacheTags.User(targetUser.Id) });
 
-                await SafeReplyAsync("", embed: $"{Context.User.Mention} podarował {user.Mention} {newScCnt} SC".ToEmbedMessage(EMType.Success).Build());
+                await SafeReplyAsync("", embed: $"{Context.User.Mention} podarował {user.Mention} {newScCnt} SC (z {value} SC po 40% podatku).".ToEmbedMessage(EMType.Success).Build());
             }
-        }
-
-        [Command("zagadka", RunMode = RunMode.Async)]
-        [Alias("riddle")]
-        [Summary("wypisuje losową zagadkę i podaje odpowiedź po 15 sekundach")]
-        [Remarks(""), RequireCommandChannel]
-        public async Task ShowRiddleAsync()
-        {
-            var riddles = new List<Question>();
-            using (var db = new Database.DatabaseContext(Config))
-            {
-                riddles = await db.GetCachedAllQuestionsAsync();
-            }
-
-            riddles = riddles.Shuffle().ToList();
-            var riddle = riddles.FirstOrDefault();
-            if (riddle == null)
-            {
-                await SafeReplyAsync("", embed: $"{Context.User.Mention} brak dostępnych zagadek.".ToEmbedMessage(EMType.Error).Build());
-                return;
-            }
-
-            riddle.RandomizeAnswers();
-            var msg = await SafeReplyAsync(riddle.Get());
-            await msg.AddReactionsAsync(riddle.GetEmotes());
-
-            await Task.Delay(15000);
-
-            int answers = 0;
-            var react = await msg.GetReactionUsersAsync(riddle.GetRightEmote(), 100).FlattenAsync();
-            foreach (var addR in riddle.GetEmotes())
-            {
-                var re = await msg.GetReactionUsersAsync(addR, 100).FlattenAsync();
-                if (re.Any(x => x.Id == Context.User.Id)) answers++;
-            }
-
-            await msg.RemoveAllReactionsAsync();
-
-            if (react.Any(x => x.Id == Context.User.Id) && answers < 2)
-            {
-                await SafeReplyAsync("", false, $"{Context.User.Mention} zgadłeś!".ToEmbedMessage(EMType.Success).Build());
-            }
-            else if (answers > 1)
-            {
-                await SafeReplyAsync("", false, $"{Context.User.Mention} wybrałeś więcej niż jedną odpowiedź!".ToEmbedMessage(EMType.Error).Build());
-            }
-            else await SafeReplyAsync("", false, $"{Context.User.Mention} pudło!".ToEmbedMessage(EMType.Error).Build());
         }
     }
 }

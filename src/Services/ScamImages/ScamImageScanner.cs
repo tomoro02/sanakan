@@ -6,7 +6,6 @@ using System.IO;
 using System.Linq;
 using System.Threading.Tasks;
 using Discord;
-using Shinden.Logger;
 
 namespace Sanakan.Services.ScamImages
 {
@@ -28,14 +27,18 @@ namespace Sanakan.Services.ScamImages
 
     public sealed class ScannedImage
     {
-        public ScannedImage(ulong hash, string url)
+        public ScannedImage(ulong hash, string url, ulong closestHash, int distance)
         {
             Hash = hash;
             Url = url;
+            ClosestHash = closestHash;
+            Distance = distance;
         }
 
         public ulong Hash { get; }
         public string Url { get; }
+        public ulong ClosestHash { get; }
+        public int Distance { get; }
     }
 
     public sealed class ScamImageScanResult
@@ -52,16 +55,17 @@ namespace Sanakan.Services.ScamImages
         private readonly ImageProcessing _images;
         private readonly ScamImageStore _store;
         private readonly ILogger _logger;
+        private readonly Func<int> _maxDistance;
 
-        public ScamImageScanner(ImageProcessing images, ScamImageStore store, ILogger logger, int maxDistance = DefaultMaxDistance)
+        public ScamImageScanner(ImageProcessing images, ScamImageStore store, ILogger logger, Func<int> maxDistance = null)
         {
             _images = images;
             _store = store;
             _logger = logger;
-            MaxDistance = maxDistance;
+            _maxDistance = maxDistance;
         }
 
-        public int MaxDistance { get; }
+        public int MaxDistance => _maxDistance?.Invoke() ?? DefaultMaxDistance;
         public int SignatureCount => _store.Count;
         public ScamImageStore Store => _store;
 
@@ -84,15 +88,18 @@ namespace Sanakan.Services.ScamImages
                         continue;
 
                     var hashes = HashStream(stream);
+                    if (hashes == null)
+                        continue;
+
                     var match = Match(hashes, url);
                     if (match != null)
                         result.Matches.Add(match);
                     else
-                        result.Unmatched.Add(new ScannedImage(hashes[0], url));
+                        result.Unmatched.Add(FindClosest(hashes, url));
                 }
                 catch (Exception ex)
                 {
-                    _logger?.LogError($"ScamImageScanner: {ex}");
+                    _logger?.LogError($"ScamImage: {ex}");
                 }
             }
 
@@ -106,24 +113,46 @@ namespace Sanakan.Services.ScamImages
             if (_store.Count == 0 || stream == null)
                 return null;
 
-            return Match(HashStream(stream), url);
+            var hashes = HashStream(stream);
+            return hashes == null ? null : Match(hashes, url);
         }
 
+        // animations are skipped: a single shared frame (e.g. a black one) could flag an innocent GIF
         private static ulong[] HashStream(Stream stream)
         {
             if (stream.CanSeek)
                 stream.Position = 0;
+
+            if (PerceptualHash.IsAnimated(stream))
+                return null;
 
             return PerceptualHash.FromStreamOrientations(stream);
         }
 
         private ScamImageMatch Match(ulong[] hashes, string url)
         {
+            int maxDistance = MaxDistance;
             foreach (var hash in hashes)
-                if (_store.TryFind(hash, MaxDistance, out var known, out var distance))
+                if (_store.TryFind(hash, maxDistance, out var known, out var distance))
                     return new ScamImageMatch(hash, known, distance, url);
 
             return null;
+        }
+
+        public ScannedImage FindClosest(ulong[] hashes, string url)
+        {
+            ulong closest = 0;
+            int bestDistance = int.MaxValue;
+            foreach (var hash in hashes)
+            {
+                if (_store.TryFind(hash, PerceptualHash.HashBits, out var known, out var distance) && distance < bestDistance)
+                {
+                    closest = known;
+                    bestDistance = distance;
+                }
+            }
+
+            return new ScannedImage(hashes[0], url, closest, bestDistance == int.MaxValue ? -1 : bestDistance);
         }
 
         public async Task<int> AddFromAttachmentsAsync(IEnumerable<IAttachment> attachments)
@@ -140,12 +169,15 @@ namespace Sanakan.Services.ScamImages
                     if (stream == null || ReferenceEquals(stream, Stream.Null))
                         continue;
 
+                    if (PerceptualHash.IsAnimated(stream))
+                        continue;
+
                     if (_store.Add(PerceptualHash.FromStream(stream)))
                         ++added;
                 }
                 catch (Exception ex)
                 {
-                    _logger?.LogError($"ScamImageScanner: {ex}");
+                    _logger?.LogError($"ScamImage: {ex}");
                 }
             }
 

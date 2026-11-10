@@ -11,6 +11,7 @@ using Sanakan.Database;
 using Sanakan.Database.Models;
 using Sanakan.Services;
 using Sanakan.Services.PocketWaifu;
+using Sanakan.Services.PocketWaifu.Fight;
 using Sanakan.Services.Time;
 
 namespace Sanakan.Extensions
@@ -63,7 +64,7 @@ namespace Sanakan.Extensions
 
         public static string GetNameWithUrl(this Card card) => $"[{card.Name}]({card.GetCharacterUrl()})";
 
-        public static string GetCharacterUrl(this Card card) => Shinden.API.Url.GetCharacterURL(card.Character);
+        public static string GetCharacterUrl(this Card card) => ShindenCompat.Url.GetCharacterURL(card.Character);
 
         public static int GetValue(this Card card)
         {
@@ -147,41 +148,63 @@ namespace Sanakan.Extensions
 
         public static bool HasCustomBorder(this Card card) => card.CustomBorder != null;
 
+        // duels pair decks of similar power, so a card is measured against opponents of its own kind:
+        // normal cards from a fresh SSS to a maxed one, ultimates from quality α to fully pilled ones
+        private static readonly (int Health, int Attack, int Defence)[] _normalReferences =
+        {
+            (100, 115, 92), (137, 123, 96), (225, 211, 99), (475, 403, 99), (850, 691, 99), (999, 999, 99),
+        };
+
+        private static readonly (int Health, int Attack, int Defence)[] _ultimateReferences =
+        {
+            (4000, 1200, 600), (12000, 2500, 1300), (28000, 4500, 2500), (3080, 3204, 1814), (4060, 5409, 3529), (6020, 9819, 6959),
+            (12600, 9999, 9999), (27300, 9999, 9999), (42000, 9999, 9999), (71400, 9999, 9999), (99999, 9999, 9999),
+        };
+
+        // how much a dere is worth at equal stats, with its relations and ability: simulated duels were tuned until every dere
+        // won half of its fights against random cards of the same power (Yami, Raito and Yato met four times less often);
+        // the duel outcome depends on the exact pair of deres, so an average of the relation table misjudged them
+        private static readonly double[] _normalDereFactor = { 0.732, 0.975, 1.061, 1.017, 0.996, 0.956, 0.977, 1.019, 1.332, 1.351, 1.581 };
+        private static readonly double[] _ultimateDereFactor = { 0.793, 1.004, 1.025, 1.014, 0.979, 0.967, 1.007, 1.003, 1.213, 1.237, 1.346 };
+
+        // a maxed normal SSS card of an average dere keeps the power it had with the old formula, in both scales
+        private static readonly double _normalPowerScale = 310 / RawCardPower(999, 999, 99, false, 0);
+        private static readonly double _ultimatePowerScale = 310 / RawCardPower(999, 999, 99, true, 0);
+
+        public static double GetCritChance(this Card card) => card.CritChance + (card.Dere == Dere.Kuudere ? DereAbility.KuudereCritBonus : 0);
+
+        private static double RawCardPower(double health, double attack, double defence, bool ultimate, double critChance)
+        {
+            double dealt = 0, taken = 0;
+            var references = ultimate ? _ultimateReferences : _normalReferences;
+            foreach (var r in references)
+            {
+                var hit = (1 - critChance) * Waifu.GetBaseDamage(attack, r.Defence, ultimate)
+                    + critChance * Waifu.GetBaseDamage(attack, r.Defence, ultimate, true);
+                dealt += hit / r.Health;
+                taken += Waifu.GetBaseDamage(r.Attack, defence, ultimate);
+            }
+
+            dealt /= references.Length;
+            taken /= references.Length;
+            return Math.Sqrt(dealt * health / taken);
+        }
+
+        // how fast the card kills typical opponents times how long it survives them, so deck power sums compare decks fairly
         public static double CalculateCardPower(this Card card)
         {
-            var cardPower = card.GetHealthWithPenalty() * 0.018;
-            cardPower += card.GetAttackWithBonus() * 0.019;
-
-            var normalizedDef = card.GetDefenceWithBonus();
-            if (normalizedDef > 99)
+            var dere = (int)card.Dere;
+            double attack = card.GetAttackWithBonus(), defence = card.GetDefenceWithBonus();
+            // the same penalty a card without a picture gets in a duel
+            if (!card.HasImage())
             {
-                normalizedDef = 99;
-                if (card.FromFigure)
-                {
-                    cardPower += (card.GetDefenceWithBonus() - normalizedDef) * 0.019;
-                }
+                attack -= attack * 20 / 100;
+                defence -= defence * 20 / 100;
             }
 
-            cardPower += normalizedDef * 2.76;
-
-            switch (card.Dere)
-            {
-                case Dere.Yami:
-                case Dere.Raito:
-                    cardPower += 20;
-                    break;
-
-                case Dere.Yato:
-                    cardPower += 30;
-                    break;
-
-                case Dere.Tsundere:
-                    cardPower -= 20;
-                    break;
-
-                default:
-                    break;
-            }
+            var cardPower = card.FromFigure
+                ? _ultimatePowerScale * _ultimateDereFactor[dere] * RawCardPower(card.GetHealthWithPenalty(), attack, defence, true, card.GetCritChance() / 100)
+                : _normalPowerScale * _normalDereFactor[dere] * RawCardPower(card.GetHealthWithPenalty(), attack, defence, false, card.GetCritChance() / 100);
 
             if (cardPower < 1)
                 cardPower = 1;
@@ -272,27 +295,6 @@ namespace Sanakan.Extensions
             return string.Join(" ", icons);
         }
 
-        public static int GetIconsCount(this Card card, Services.PocketWaifu.TagHelper tags)
-        {
-            int count = 0;
-            if (card.Active) count++;
-            if (card.Unique) count++;
-            if (card.FromFigure) count++;
-            if (!card.IsTradable) count++;
-            if (card.IsBroken()) count++;
-            if (card.InCage) count++;
-            if (card.Curse != CardCurse.None) count++;
-            if (card.Expedition != CardExpedition.None) count++;
-            if (!string.IsNullOrEmpty(card.CustomImage)) count++;
-            if (!string.IsNullOrEmpty(card.CustomBorder)) count++;
-            if (card.GetThreeStateMarketValue() != MarketValue.Normal) count++;
-
-            if (!card.Tags.IsNullOrEmpty())
-                count += tags.GetAllIcons(card).Count;
-
-            return count;
-        }
-
         public static string GetPocketUrl(this Card card) => _UseAlterUrl ? card.GetPocketAlterUrl() : card.GetPocketWaifuUrl();
         public static string GetPocketWaifuUrl(this Card card) => card.Id == 0 ? "": $"https://waifu.sanakan.pl/#/card/{card.Id}";
         public static string GetPocketAlterUrl(this Card card) => card.Id == 0 ? "": $"https://alter.sanakan.pl/card/{card.Id}";
@@ -300,6 +302,58 @@ namespace Sanakan.Extensions
         public static string GetIdWithUrl(this Card card) => _UseAlterUrl ? card.GetIdWithAlterUrl() : card.GetIdWithWaifuUrl();
         public static string GetIdWithWaifuUrl(this Card card) => card.Id == 0 ? "~~**[0]**~~": $"**[[{card.Id}](https://waifu.sanakan.pl/#/card/{card.Id})]**";
         public static string GetIdWithAlterUrl(this Card card) => card.Id == 0 ? "~~**[0]**~~": $"**[[{card.Id}](https://alter.sanakan.pl/card/{card.Id})]**";
+
+        private static string GetTagsLine(this Card card, Services.PocketWaifu.TagHelper tags)
+        {
+            var line = $"{(card.Tags.IsNullOrEmpty() ? "" : string.Join(" ", card.Tags.Select(x => x.Name)))} {card.GetStatusIcons(tags)}".Trim();
+            return line.Length == 0 ? "brak" : line;
+        }
+
+        private static string GetWhoWantsLine(this Card card)
+        {
+            var kcs = Fun.IsAF() ? Fun.GetAFKC(card.Character) : card.WhoWantsCount;
+            return $"KC: {kcs} ({card.AWhoWantsCount} aktywnych)";
+        }
+
+        public static string GetHealthLine(this Card card)
+        {
+            var health = card.GetHealthWithPenalty();
+            return health == card.Health ? $"{health}" : $"{health} (bazowo {card.Health})";
+        }
+
+        public static EmbedBuilder GetView(this Card card, bool hideScalpelInfo, Services.PocketWaifu.TagHelper tags, ISystemTime time)
+        {
+            var more = new List<string>
+            {
+                $"{(card.Active ? "Aktywna" : "Nieaktywna")} · {(card.InCage ? "w klatce" : "poza klatką")} · {(card.IsTradable ? "można wymieniać" : "nie można wymieniać")}",
+                $"Numer: {card.GetIdWithUrl()} · postać {card.Character} · restarty: {card.RestartCnt} · ulepszenia: {card.UpgradesCnt}",
+                card.GetWhoWantsLine(),
+                $"Zdobyta: {card.Source.GetString()}, {card.CreationDate.ToShortDateTime()}",
+            };
+            var ability = card.Dere.GetAbilityDescription();
+            if (ability != null)
+                more.Insert(0, $"Zdolność ({card.Dere}): {ability}");
+            if (!string.IsNullOrEmpty(card.CustomImage) && !hideScalpelInfo)
+                more.Add($"Obrazek ustawiony {card.CustomImageDate.ToShortDateTime()} · animacja: {card.IsCardAnimated().GetYesNo()}");
+            more.Add($"Tagi: {card.GetTagsLine(tags)}");
+
+            return new EmbedBuilder
+            {
+                Title = $"{card.Name} · {card.GetCardRealRarity()}".TrimToLength(EmbedBuilder.MaxTitleLength),
+                Url = card.GetCharacterUrl(),
+                Description = $"_{card.Title ?? "????"}_",
+            }
+            .AddField("❤ Życie", card.GetHealthLine(), true)
+            .AddField("🔥 Atak", $"{card.GetAttackWithBonus()}", true)
+            .AddField("🛡 Obrona", $"{card.GetDefenceWithBonus()}", true)
+            .AddField("💞 Relacja", card.GetAffectionString(), true)
+            .AddField("🎭 Charakter", card.Dere.ToString(), true)
+            .AddField("😴 Zmęczenie", card.GetFatigueString(time), true)
+            .AddField("📈 Doświadczenie", $"{card.ExpCnt:0.##} / {card.ExpToUpgrade():0.##}", true)
+            .AddField("⚡ Moc", $"{card.CalculateCardPower():0}", true)
+            .AddField("🎯 Precyzja", $"{card.GetCritChance():0.#}%", true)
+            .AddField("Więcej", string.Join("\n", more).TrimToLength(EmbedFieldBuilder.MaxFieldValueLength));
+        }
 
         public static string GetDescSmall(this Card card, Services.PocketWaifu.TagHelper tags, ISystemTime time)
         {
@@ -310,7 +364,8 @@ namespace Sanakan.Extensions
                 + $"{card.Dere}\n"
                 + $"{card.GetAffectionString()}\n"
                 + $"{card.GetFatigueString(time)}\n"
-                + $"{card.ExpCnt:F}/{card.ExpToUpgrade():F} exp\n\n"
+                + $"{card.ExpCnt:F}/{card.ExpToUpgrade():F} exp\n"
+                + $"{card.GetCritChance():0.#}% precyzji\n\n"
                 + $"{(card.Tags.IsNullOrEmpty() ? "---" : string.Join(" ", card.Tags.Select(x => x.Name)))}\n"
                 + $"{card.GetStatusIcons(tags)}";
         }
@@ -327,7 +382,8 @@ namespace Sanakan.Extensions
                 + $"**Relacja:** {card.GetAffectionString()}\n"
                 + $"**Zmęczenie:** {card.GetFatigueString(time)}\n"
                 + $"**Doświadczenie:** {card.ExpCnt:F}/{card.ExpToUpgrade():F}\n"
-                + $"**Dostępne ulepszenia:** {card.UpgradesCnt}\n\n"
+                + $"**Dostępne ulepszenia:** {card.UpgradesCnt}\n"
+                + $"**Precyzja:** {card.GetCritChance():0.#}%\n\n"
                 + $"**W klatce:** {card.InCage.GetYesNo()}\n"
                 + $"**Aktywna:** {card.Active.GetYesNo()}\n"
                 + $"**Możliwość wymiany:** {card.IsTradable.GetYesNo()}\n\n"
@@ -345,7 +401,7 @@ namespace Sanakan.Extensions
         public static int GetHealthWithPenalty(this Card card, bool allowZero = false)
         {
             var percent = card.Affection * 5d / 100d;
-            var maxHealth = card.FromFigure ? 99999 : 999;
+            var maxHealth = card.FromFigure ? MaxUltimateHealth : 999;
             var bonusFromFood = Math.Min((int)(card.Health * percent), 2000);
 
             var newHealth = card.Health + bonusFromFood;
@@ -419,7 +475,7 @@ namespace Sanakan.Extensions
 
         public static int GetAttackWithBonus(this Card card)
         {
-            var maxAttack = card.FromFigure ? 9999 : 999;
+            var maxAttack = card.FromFigure ? MaxUltimateAttack : 999;
             var newAttack = card.Attack + card.GetAttackFromStars();
             newAttack += card.FromFigure ? card.AttackBonus : card.AttackBonus / 3;
 
@@ -433,7 +489,7 @@ namespace Sanakan.Extensions
 
         public static int GetDefenceWithBonus(this Card card)
         {
-            var maxDefence = card.FromFigure ? 9999 : 99;
+            var maxDefence = card.FromFigure ? MaxUltimateDefence : 99;
             var newDefence = card.Defence + card.GetDefenceFromStars();
             newDefence += card.FromFigure ? card.DefenceBonus : 0;
 
@@ -590,7 +646,7 @@ namespace Sanakan.Extensions
                 case Rarity.SSS:
                     if (fromFigure)
                     {
-                        return 1000 + (50 * (int)q);
+                        return UltimateExpToUpgrade((int)q);
                     }
                     return 1000;
                 case Rarity.SS:
@@ -601,9 +657,57 @@ namespace Sanakan.Extensions
             }
         }
 
+        private static double UltimateExpToUpgrade(int qualityValue) => 1000 + (50 * qualityValue);
+
         public static double ExpToUpgrade(this Card card)
         {
-            return card.Rarity.ExpToUpgrade(card.FromFigure, card.Quality.Fake(card.BorderOverflow));
+            if (card.FromFigure && card.Rarity == Rarity.SSS)
+                return UltimateExpToUpgrade(card.GetUltimateValue());
+
+            return card.Rarity.ExpToUpgrade(card.FromFigure, card.Quality);
+        }
+
+        // the overflow adds whole points to the quality value and the card plays as the highest quality that value reaches,
+        // so the gaps between qualities fill in by themselves if a new quality is ever added there
+        public static int GetUltimateValue(this Card card) => (int)card.Quality + card.BorderOverflow;
+
+        public static Quality GetEffectiveQuality(this Card card) => QualityReachedBy(card.GetUltimateValue());
+
+        public static Quality QualityReachedBy(int value)
+        {
+            var reached = Quality.Broken;
+            foreach (var quality in Enum.GetValues(typeof(Quality)).Cast<Quality>())
+            {
+                if ((int)quality <= value)
+                    reached = quality;
+            }
+            return reached;
+        }
+
+        // both the overflow and a normal upgrade take a figure or an ultimate card of the quality the card plays as
+        public static string GetUltimateUpgradeBlockReason(this Card card, Quality offered, bool isFigure)
+        {
+            var required = card.GetEffectiveQuality();
+            if (required == Quality.Omega)
+                return "tej karty nie można już ulepszyć.";
+
+            if (offered != required)
+                return $"{(isFigure ? "ta figurka" : "ta karta")} nie ma wymaganej jakości (potrzebna: {required.ToName()}).";
+
+            return null;
+        }
+
+        public static void ApplyUltimateUpgrade(this Card card, bool overflow)
+        {
+            if (overflow)
+            {
+                card.BorderOverflow += 1;
+                return;
+            }
+
+            card.Quality = card.GetEffectiveQuality().Next();
+            card.BorderOverflow = 0;
+            card.BorderVariant = 0;
         }
 
         public static int GetAttackMin(this Rarity rarity)
@@ -717,7 +821,7 @@ namespace Sanakan.Extensions
                 {
                     if (card.Affection < -10)
                     {
-                        var r = -card.Affection + 10;
+                        var r = -card.Affection - 10;
                         card.Affection = -10;
                         value -= r;
                     }
@@ -797,7 +901,7 @@ namespace Sanakan.Extensions
 
         public static string GetImage(this Card card) => card.CustomImage ?? card.Image;
 
-        public static async Task Update(this Card card, IUser user, Shinden.ShindenClient client, bool updateTitle = false)
+        public static async Task Update(this Card card, IUser user, ShindenCompat.ShindenClient client, bool updateTitle = false)
         {
             var response = await client.GetCharacterInfoAsync(card.Character);
             if (!response.IsSuccessStatusCode())
@@ -833,16 +937,65 @@ namespace Sanakan.Extensions
         public static StarStyle Parse(this StarStyle star, string s)
             => star.TryParse(s, out var type) ? type : throw new Exception("Couldn't parse input!");
 
-        public static ExecutionResult CanUpgradePower(this Card card, int by = 1)
+        public const double PrecisionPerItem = 0.1;
+        public const double MaxCritChance = 25;
+        public const double MaxUltimateCritChance = 40;
+
+        public static double GetMaxCritChance(this Card card) => card.FromFigure ? MaxUltimateCritChance : MaxCritChance;
+
+        // glasses beyond the limit would be used up without changing anything
+        public static long UsefulPrecisionItems(this Card card)
+            => Math.Max(0, (long)Math.Floor((card.GetMaxCritChance() - card.CritChance) / PrecisionPerItem + 1e-6));
+
+        public static void AddCritChance(this Card card, long items)
+            => card.CritChance = Math.Min(card.GetMaxCritChance(), Math.Round(card.CritChance + items * PrecisionPerItem, 1));
+
+        public const int MaxUltimateAttack = 9999;
+        public const int MaxUltimateDefence = 9999;
+        public const int MaxUltimateHealth = 99999;
+
+        // pills beyond a stat limit would be used up without changing anything
+        public static long UsefulUltimatePills(this Card card, ItemType type)
+        {
+            static long Room(long max, long current, int perPill) => Math.Max(0, (max - current + perPill - 1) / perPill);
+
+            var attack = card.Attack + card.GetAttackFromStars() + card.AttackBonus;
+            var defence = card.Defence + card.GetDefenceFromStars() + card.DefenceBonus;
+            var health = card.Health + card.HealthBonus;
+
+            return type switch
+            {
+                ItemType.IncreaseUltimateAttack => Room(MaxUltimateAttack, attack, 5),
+                ItemType.IncreaseUltimateDefence => Room(MaxUltimateDefence, defence, 3),
+                ItemType.IncreaseUltimateHealth => Room(MaxUltimateHealth, health, 5),
+                ItemType.IncreaseUltimateAll => new[] { Room(MaxUltimateAttack, attack, 4), Room(MaxUltimateDefence, defence, 4), Room(MaxUltimateHealth, health, 4) }.Max(),
+                _ => long.MaxValue,
+            };
+        }
+
+        public static string UltimateStatAtLimit(this ItemType type) => type switch
+        {
+            ItemType.IncreaseUltimateAttack => $"atak tej karty jest już maksymalny ({MaxUltimateAttack}).",
+            ItemType.IncreaseUltimateDefence => $"obrona tej karty jest już maksymalna ({MaxUltimateDefence}).",
+            ItemType.IncreaseUltimateHealth => $"punkty życia tej karty są już maksymalne ({MaxUltimateHealth}).",
+            _ => "wszystkie parametry tej karty są już maksymalne.",
+        };
+
+        // omega is the last quality, so its pills are enough to max every stat
+        public static long GetMaxUltimateParams(this Card card) => card.GetEffectiveQuality() == Quality.Omega
+            ? (long)MaxUltimateHealth + MaxUltimateAttack + MaxUltimateDefence
+            : 4900L * card.GetUltimateValue();
+
+        public static ExecutionResult CanUpgradePower(this Card card, long points)
         {
             if (!card.FromFigure)
             {
                 return ExecutionResult.FromError("ten przedmiot można użyć tylko na karcie ultimate.");
             }
 
-            var currParams = card.AttackBonus + card.HealthBonus + card.DefenceBonus;
-            var maxParams = 4900 * (int)card.Quality.Fake(card.BorderOverflow);
-            if (currParams + by >= maxParams)
+            long currParams = card.AttackBonus + card.HealthBonus + card.DefenceBonus;
+            long maxParams = card.GetMaxUltimateParams();
+            if (currParams + points > maxParams)
             {
                 return ExecutionResult.FromError("nie można już bardziej zwiększyć parametrów na tej karcie.");
             }
@@ -1019,7 +1172,7 @@ namespace Sanakan.Extensions
             target.user.GameDeck.RecalculateDeck();
         }
 
-        public static int GetMarketBonusFromUltimate(this Card card) => card.Quality.Fake(card.BorderOverflow) switch
+        public static int GetMarketBonusFromUltimate(this Card card) => card.GetEffectiveQuality() switch
         {
             Quality.Alpha   => 1,
             Quality.Beta    => 2,
@@ -1035,6 +1188,8 @@ namespace Sanakan.Extensions
             Quality.Omega   => 8,
             _ => 0
         };
+
+        public const string ProtectedFromDiscardingInfo = "chronione są karty aktywne, w klatce, ulubione, ultimate, przeklęte, zmęczone i na wyprawie";
 
         public static bool IsProtectedFromDiscarding(this Card card, TagHelper helper) => card is null
             || card.Active

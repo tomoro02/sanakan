@@ -18,7 +18,6 @@ using Sanakan.Services.PocketWaifu;
 using Sanakan.Services.Session;
 using Sanakan.Services.Session.Models;
 using Sanakan.Services.Time;
-using Z.EntityFramework.Plus;
 
 namespace Sanakan.Modules
 {
@@ -161,18 +160,15 @@ namespace Sanakan.Modules
                 var config = await db.GetCachedGuildFullConfigAsync(Context.Guild.Id);
                 if (config.SelfRoles.Count < 1)
                 {
-                    await SafeReplyAsync("", embed: "Nie odnaleziono roli.".ToEmbedMessage(EMType.Error).Build());
+                    await SafeReplyAsync("", embed: "Na tym serwerze nie ma ról do samodzielnego przyznania.".ToEmbedMessage(EMType.Neutral).Build());
                     return;
                 }
 
-                string stringRole = "";
-                foreach (var selfRole in config.SelfRoles)
-                {
-                    var gRole = Context.Guild.GetRole(selfRole?.Role ?? 0);
-                    stringRole += $" `{selfRole.Name}` ";
-                }
+                var roles = config.SelfRoles.Select(x => $"`{x.Name}` → {Context.Guild.GetRole(x.Role)?.Mention ?? "rola usunięta z serwera"}");
+                var prefix = config.Prefix ?? Config.Get().Prefix;
 
-                await SafeReplyAsync($"**Dostępne role:**\n{stringRole}\n\nUżyj `s.przyznaj role [nazwa]` aby dodać lub `s.zdejmij role [nazwa]` odebrać sobie rolę.");
+                await SafeReplyAsync("", embed: $"{string.Join("\n", roles)}\n\nUżyj `{prefix}przyznaj role [nazwa]`, aby dodać rolę, albo `{prefix}zdejmij role [nazwa]`, aby ją zdjąć."
+                    .TrimToLength(4000).ToEmbedMessage(EMType.Info).WithTitle("Role do wzięcia").Build());
             }
         }
 
@@ -216,7 +212,8 @@ namespace Sanakan.Modules
                     return;
                 }
 
-                await SafeReplyAsync("", embed: $"{usr.Mention} potrzebuje **{botuser.GetRemainingExp()}** punktów doświadczenia do następnego poziomu."
+                var remaining = botuser.GetRemainingExp();
+                await SafeReplyAsync("", embed: $"{usr.Mention} potrzebuje **{remaining}** {Polish.Plural(remaining, "punkt", "punkty", "punktów")} doświadczenia do następnego poziomu."
                     .ToEmbedMessage(EMType.Info).Build());
             }
         }
@@ -233,7 +230,7 @@ namespace Sanakan.Modules
             var building = await SafeReplyAsync("", embed: $"🔨 Trwa budowanie topki...".ToEmbedMessage(EMType.Bot).Build());
             using (var db = new Database.DatabaseContext(Config))
             {
-                session.ListItems = _profile.BuildListView(await _profile.GetTopUsers(db.GetQueryableAllUsers(), type), type, Context.Guild);
+                session.ListItems = _profile.BuildListView(await _profile.GetTopUsers(db, type), Context.Guild);
             }
 
             session.Event = ExecuteOn.ReactionAdded;
@@ -251,14 +248,20 @@ namespace Sanakan.Modules
             await _session.TryAddSession(session);
         }
 
-        [Command("profil", RunMode = RunMode.Async)]
+        public const string ProfileCommand = "profil";
+        public static readonly TimeSpan ProfileCooldown = TimeSpan.FromMinutes(5);
+
+        public static string SavedProfileNote(DateTime savedAt, DateTime availableAt)
+            => $"Zapisany profil z {savedAt.ToRemTime()} · nowy wygenerujesz {availableAt.ToRemTime()}";
+
+        [Command(ProfileCommand, RunMode = RunMode.Async)]
         [Alias("profile")]
         [Summary("wyświetla profil użytkownika")]
-        [Remarks("karna"), DelayNextUseBy(5)]
+        [Remarks("karna")]
         public async Task ShowUserProfileAsync([Summary("nazwa użytkownika")]SocketGuildUser user = null)
         {
             var usr = user ?? Context.User as SocketGuildUser;
-            if (usr == null) return;
+            if (usr == null || Context.User is not SocketGuildUser caller) return;
 
             var isBot =  usr.Id == Context.Client.CurrentUser.Id;
             var searchId = isBot ? 1 : usr.Id;
@@ -272,6 +275,17 @@ namespace Sanakan.Modules
                     return;
                 }
 
+                var url = Api.Models.CardFinalView.GetProfileUrl(dataUser.Id);
+                var profileUri = $"{Dir.FakeCardsAsProfiles}/{dataUser.Id}.webp";
+
+                var availableAt = await DelayNextUseBy.TryUseAsync(caller, ProfileCommand, ProfileCooldown, Config, _time);
+                if (availableAt != null)
+                {
+                    if (!await TrySendSavedImageAsync(profileUri, savedAt => SavedProfileNote(savedAt, availableAt.Value)))
+                        await SafeReplyAsync("", embed: DelayNextUseBy.CooldownMessage(caller, availableAt.Value).ToEmbedMessage(EMType.Error).Build());
+                    return;
+                }
+
                 long rankingPosition = 0;
                 if (!isBot)
                 {
@@ -280,8 +294,6 @@ namespace Sanakan.Modules
                     rankingPosition = allUsers.OrderByDescending(x => x.ExpCnt).ToList().IndexOf(rankingUser) + 1;
                 }
 
-                var url = Api.Models.CardFinalView.GetProfileUrl(dataUser.Id);
-                var profileUri = $"{Dir.FakeCardsAsProfiles}/{dataUser.Id}.webp";
                 dataUser.GameDeck.Cards = (await db.GetCachedUserGameDeckAsync(searchId)).Cards;
                 using (var image = await _profile.GetProfileImageAsync(usr, dataUser, rankingPosition))
                 {
@@ -342,7 +354,7 @@ namespace Sanakan.Modules
                     {
                         await db.SaveChangesAsync();
 
-                        QueryCacheManager.ExpireTag(new string[] { CacheTags.User(botuser.Id) });
+                        QueryCache.ExpireTag(new string[] { CacheTags.User(botuser.Id) });
 
                         await SafeReplyAsync("", embed: $"**Odebrane nagrody:**\n\n{string.Join("\n", rewards)}".ToEmbedMessage(EMType.Success).WithUser(Context.User).Build());
                         return;
@@ -373,12 +385,24 @@ namespace Sanakan.Modules
                 return;
             }
 
+            if (config.Type == ProfileConfigType.Code)
+            {
+                await ConfigureProfileFromCodeAsync(config);
+                return;
+            }
+
             using (var db = new Database.DatabaseContext(Config))
             {
                 var botuser = await db.GetUserOrCreateSimpleAsync(Context.User.Id);
 
+                if (config.ChangesNothing(botuser))
+                {
+                    await SafeReplyAsync("", embed: $"{Context.User.Mention} masz już to ustawione.".ToEmbedMessage(EMType.Error).Build());
+                    return;
+                }
+
                 var toPay = config.ToPay();
-                if (config.NeedPay() && !botuser.Pay(toPay))
+                if (config.NeedPay(botuser) && !botuser.Pay(toPay))
                 {
                     await SafeReplyAsync("", embed: $"{Context.User.Mention} nie masz wystarczającej liczby **{toPay.Type}**, potrzebujesz {toPay.Cost}.".ToEmbedMessage(EMType.Error).Build());
                     return;
@@ -521,11 +545,186 @@ namespace Sanakan.Modules
 
                 await db.SaveChangesAsync();
 
-                QueryCacheManager.ExpireTag(new string[] { CacheTags.User(botuser.Id) });
+                QueryCache.ExpireTag(new string[] { CacheTags.User(botuser.Id) });
 
                 await SafeReplyAsync("", embed: $"{Context.User.Mention} {config.What()}".ToEmbedMessage(EMType.Success).Build());
             }
         }
+
+        private async Task ConfigureProfileFromCodeAsync(ProfileConfig config)
+        {
+            using (var db = new Database.DatabaseContext(Config))
+            {
+                var botuser = await db.GetUserOrCreateSimpleAsync(Context.User.Id);
+                if (config.Code == null)
+                {
+                    await ShowProfileCodeAsync(db, botuser, config.WithImages);
+                    return;
+                }
+
+                var code = ProfileCode.Decode(config.Code);
+                if (code == null)
+                {
+                    await SafeReplyAsync("", embed: $"{Context.User.Mention} podany kod jest niepoprawny.".ToEmbedMessage(EMType.Error).Build());
+                    return;
+                }
+
+                var styleAttachment = config.Url != null;
+                var error = code.Validate(botuser, styleAttachment, TypeReaders.ProfileConfigTypeReader.IsSelectableBorder);
+                if (error != null)
+                {
+                    await SafeReplyAsync("", embed: $"{Context.User.Mention} {error}".ToEmbedMessage(EMType.Error).Build());
+                    return;
+                }
+
+                if (!code.ChangesAnything(botuser, styleAttachment))
+                {
+                    await SafeReplyAsync("", embed: $"{Context.User.Mention} twój profil ma już te ustawienia.".ToEmbedMessage(EMType.Error).Build());
+                    return;
+                }
+
+                var costs = code.GetCosts(botuser, styleAttachment, config.Currency);
+                var total = costs.Sum(x => x.Cost.Cost);
+
+                // the context is never saved here, Pay only checks the balance
+                if (total > 0 && !botuser.Pay(new CurrencyCost((int)total, config.Currency)))
+                {
+                    await SafeReplyAsync("", embed: $"{Context.User.Mention} nie masz wystarczającej liczby **{config.Currency}**, potrzebujesz {total}.".ToEmbedMessage(EMType.Error).Build());
+                    return;
+                }
+
+                var session = new AcceptSession(Context.User, null, Context.Client.CurrentUser);
+                await _session.KillSessionIfExistAsync(session);
+
+                var actions = new AcceptProfileCode(Config)
+                {
+                    User = Context.User,
+                    Code = code,
+                    Currency = config.Currency,
+                    Total = total,
+                    StyleAttachment = styleAttachment,
+                };
+
+                var failed = await DownloadCodeImagesAsync(actions, code, config.Url, botuser.Id);
+                if (failed != null)
+                {
+                    actions.DeletePending();
+                    var why = failed == AttachmentName ? "nie wykryto obrazka w załączniku! Upewnij się, że podałeś poprawny adres!"
+                        : $"nie udało się pobrać obrazka z kodu ({failed}), link mógł wygasnąć.";
+                    await SafeReplyAsync("", embed: $"{Context.User.Mention} {why}".ToEmbedMessage(EMType.Error).Build());
+                    return;
+                }
+
+                var withImages = code.Images.Keys.OrderBy(x => x).Select(x => ImageNames[x]).ToList();
+                if (styleAttachment)
+                    withImages.Add("obrazek stylu z załącznika");
+
+                var price = costs.Count == 0 ? "bez opłat"
+                    : string.Join("\n", costs.Select(x => $"{x.What}: {x.Cost}")) + $"\n**Razem:** {total} {config.Currency}";
+
+                var msg = await SafeReplyAsync("", embed: $"{Context.User.Mention} ustawić profil z kodu{(withImages.Count > 0 ? " z obrazkami: " + string.Join(", ", withImages) : "")}?\n\n**Koszt:**\n{price}".ToEmbedMessage(EMType.Bot).Build());
+                await msg.AddReactionsAsync(session.StartReactions);
+                actions.Message = msg;
+                session.Actions = actions;
+                session.Message = msg;
+
+                await _session.TryAddSession(session);
+            }
+        }
+
+        private static readonly Dictionary<ProfileImage, string> ImageNames = new Dictionary<ProfileImage, string>
+        {
+            { ProfileImage.Background, "tło" },
+            { ProfileImage.Style, "obrazek stylu" },
+            { ProfileImage.Overlay, "nakładka" },
+            { ProfileImage.Premium, "ultra nakładka" },
+            { ProfileImage.BackgroundAndStyle, "tło i styl" },
+        };
+
+        private const string AttachmentName = "załącznik";
+
+        // every image of the code downloaded before the price is shown, as the commands for each image do;
+        // null when all came, otherwise the name of the one that did not
+        private async Task<string> DownloadCodeImagesAsync(AcceptProfileCode actions, ProfileCode code, string attachment, ulong userId)
+        {
+            async Task<bool> Save(ProfileImage image, string url, int width, int height, bool stretch = false)
+            {
+                var path = AcceptProfileCode.PendingPath(image, userId);
+                actions.PendingImages[image] = path;
+                return await _profile.SaveProfileImageAsync(url, path, width, height, stretch) == SaveResult.Success;
+            }
+
+            if (attachment != null && !await Save(ProfileImage.Style, attachment, 750, 340))
+                return AttachmentName;
+
+            foreach (var (image, url) in code.Images.OrderBy(x => x.Key))
+            {
+                var ok = image switch
+                {
+                    ProfileImage.Background => await Save(ProfileImage.Background, url, 750, 160, true),
+                    ProfileImage.Style => await Save(ProfileImage.Style, url, 750, 340),
+                    ProfileImage.Overlay => await Save(ProfileImage.Overlay, url, 750, 402),
+                    ProfileImage.Premium => await Save(ProfileImage.Premium, url, 750, 500),
+                    _ => await SaveBackgroundAndStyleAsync(actions, url, userId),
+                };
+                if (!ok)
+                    return ImageNames[image];
+            }
+            return null;
+        }
+
+        private async Task<bool> SaveBackgroundAndStyleAsync(AcceptProfileCode actions, string url, ulong userId)
+        {
+            var background = AcceptProfileCode.PendingPath(ProfileImage.Background, userId);
+            var style = AcceptProfileCode.PendingPath(ProfileImage.Style, userId);
+            actions.PendingImages[ProfileImage.Background] = background;
+            actions.PendingImages[ProfileImage.Style] = style;
+            return await _profile.SaveProfileAndStyleImageAsync(url, background, 750, 160, style, 750, 340) == SaveResult.Success;
+        }
+
+        // the code of the profile, with images links to the account's pictures sent to the trash channel
+        private async Task ShowProfileCodeAsync(Database.DatabaseContext db, User botuser, bool withImages)
+        {
+            var code = ProfileCode.FromUser(botuser);
+            var note = "";
+            if (withImages)
+            {
+                var gConfig = await db.GetCachedGuildFullConfigAsync(Context.Guild.Id);
+                var trash = Context.Guild.GetTextChannel(gConfig?.WaifuConfig?.TrashCommandsChannel ?? 0);
+                if (trash == null)
+                {
+                    note = "\n\nNa tym serwerze nie ma kanału na obrazki, więc kod jest bez obrazków.";
+                }
+                else
+                {
+                    code = await _profile.GetProfileCodeWithImagesAsync(botuser, trash, false);
+                    note = code.Images.Count > 0 ? "\n\nKod z obrazkami działa przez 24 godziny, potem linki do obrazków wygasną. Każdy obrazek z kodu jest płatny przy ustawianiu."
+                        : "\n\nNie masz własnych obrazków, więc kod jest bez nich.";
+                }
+            }
+
+            var text = code.Encode();
+            var how = code.Images.Count > 0 ? $"```{text}```\n*Ustawisz go poleceniem* `konfiguracja profilu kod <kod>`"
+                : $"`{text}`\n\n*Ustawisz go poleceniem* `konfiguracja profilu kod {text}`";
+            var embed = $"{Context.User.Mention} kod twojego profilu: {how}{note}".ToEmbedMessage(EMType.Info).Build();
+
+            // a link button takes at most 512 characters, a longer code goes as a link in a message of its own
+            var profilator = ProfilatorUrl + text;
+            if (profilator.Length <= MaxButtonUrl)
+            {
+                var button = new ComponentBuilder().WithButton(ProfilatorLabel, style: ButtonStyle.Link, url: profilator).Build();
+                await SafeReplyAsync("", embed: embed, components: button);
+                return;
+            }
+
+            await SafeReplyAsync("", embed: embed);
+            await SafeReplyAsync("", embed: $"[{ProfilatorLabel}]({profilator})".ToEmbedMessage(EMType.Info).Build());
+        }
+
+        private const string ProfilatorUrl = "https://sanakan.pl/profilator/#";
+        private const string ProfilatorLabel = "Kliknij tutaj, by przejść do Profilatora";
+        private const int MaxButtonUrl = 512;
+
 
         [Command("globalki")]
         [Alias("global")]
@@ -569,9 +768,9 @@ namespace Sanakan.Modules
 
                 await db.SaveChangesAsync();
 
-                QueryCacheManager.ExpireTag(new string[] { CacheTags.User(botuser.Id) });
+                QueryCache.ExpireTag(new string[] { CacheTags.User(botuser.Id) });
 
-                await SafeReplyAsync("", embed: $"{user.Mention} wykupił miesiąc globalnych emotek!".ToEmbedMessage(EMType.Success).Build());
+                await SafeReplyAsync("", embed: $"{user.Mention} wykupił miesiąc globalnych emotek, ważne do {global.EndsAt.ToShortDateTime()}.".ToEmbedMessage(EMType.Success).Build());
             }
         }
 
@@ -652,12 +851,12 @@ namespace Sanakan.Modules
 
                 await db.SaveChangesAsync();
 
-                QueryCacheManager.ExpireTag(new string[] { CacheTags.User(botuser.Id) });
+                QueryCache.ExpireTag(new string[] { CacheTags.User(botuser.Id) });
 
                 await user.AddRoleAsync(selectedRole);
-            }
 
-            await SafeReplyAsync("", embed: $"{user.Mention} wykupił kolor!".ToEmbedMessage(EMType.Success).Build());
+                await SafeReplyAsync("", embed: $"{user.Mention} wykupił kolor, ważny do {colort.EndsAt.ToShortDateTime()}.".ToEmbedMessage(EMType.Success).Build());
+            }
         }
 
         [Command("kolor")]
@@ -718,7 +917,7 @@ namespace Sanakan.Modules
                     colort.BValue = true;
                     if (!await _profile.SetUserColorAsync(user, gConfig.MuteRole, color))
                     {
-                        await SafeReplyAsync("", embed: $"Coś poszło nie tak!".ToEmbedMessage(EMType.Error).Build());
+                        await SafeReplyAsync("", embed: $"{user.Mention} nie udało się nadać koloru, opłata nie została pobrana. Zgłoś to administracji.".ToEmbedMessage(EMType.Error).Build());
                         return;
                     }
 
@@ -737,9 +936,12 @@ namespace Sanakan.Modules
 
                 await db.SaveChangesAsync();
 
-                QueryCacheManager.ExpireTag(new string[] { CacheTags.User(botuser.Id) });
+                QueryCache.ExpireTag(new string[] { CacheTags.User(botuser.Id) });
 
-                await SafeReplyAsync("", embed: $"{user.Mention} wykupił kolor!".ToEmbedMessage(EMType.Success).Build());
+                var reply = color == FColor.CleanColor
+                    ? $"{user.Mention} zdjęto kolor."
+                    : $"{user.Mention} wykupił kolor, ważny do {colort.EndsAt.ToShortDateTime()}.";
+                await SafeReplyAsync("", embed: reply.ToEmbedMessage(EMType.Success).Build());
             }
         }
     }

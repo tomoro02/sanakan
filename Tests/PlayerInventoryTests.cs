@@ -50,8 +50,45 @@ namespace Artifacts
             var list = new List<BoosterPackCharacter> { new BoosterPackCharacter { Character = 5 } };
 
             Assert.Equal(CardsPoolType.List, UserBoosterPack.From(new BoosterPack { Title = 10, Characters = list }, 1).Pool);
+            Assert.Equal(CardsPoolType.Season, UserBoosterPack.From(new BoosterPack { Title = 10, Season = "2026-autumn", Characters = new List<BoosterPackCharacter>() }, 1).Pool);
             Assert.Equal(CardsPoolType.Title, UserBoosterPack.From(new BoosterPack { Title = 10, Characters = new List<BoosterPackCharacter>() }, 1).Pool);
             Assert.Equal(CardsPoolType.Random, UserBoosterPack.From(new BoosterPack { Characters = new List<BoosterPackCharacter>() }, 1).Pool);
+        }
+
+        [Fact]
+        public void SeasonPack_ShowsSeasonKeyAndName()
+        {
+            var dto = UserBoosterPack.From(new BoosterPack { Season = "2026-autumn", Characters = new List<BoosterPackCharacter>() }, 1);
+
+            Assert.Equal("2026-autumn", dto.Season);
+            Assert.Equal("jesień 2026", dto.SeasonName);
+        }
+
+        [Fact]
+        public void OtherPacks_HaveNoSeason()
+        {
+            var list = new List<BoosterPackCharacter> { new BoosterPackCharacter { Character = 5 } };
+
+            foreach (var pack in new[]
+            {
+                new BoosterPack { Characters = new List<BoosterPackCharacter>() },
+                new BoosterPack { Title = 10, Characters = new List<BoosterPackCharacter>() },
+                new BoosterPack { Season = "2026-autumn", Characters = list },
+            })
+            {
+                var dto = UserBoosterPack.From(pack, 1);
+                Assert.Null(dto.Season);
+                Assert.Null(dto.SeasonName);
+            }
+        }
+
+        [Fact]
+        public void SeasonPack_WithUnreadableKey_KeepsKeyWithoutName()
+        {
+            var dto = UserBoosterPack.From(new BoosterPack { Season = "broken", Characters = new List<BoosterPackCharacter>() }, 1);
+
+            Assert.Equal("broken", dto.Season);
+            Assert.Null(dto.SeasonName);
         }
 
         [Fact]

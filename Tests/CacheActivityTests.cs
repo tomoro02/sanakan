@@ -13,7 +13,6 @@ using Sanakan.Database.Models.Configuration;
 using Sanakan.Database.Models.Management;
 using Sanakan.Extensions;
 using Xunit;
-using Z.EntityFramework.Plus;
 
 namespace Artifacts
 {
@@ -48,21 +47,14 @@ namespace Artifacts
         private static async Task<int> CachedCardCountAsync(string db, Func<IQueryable<Card>, IQueryable<Card>> filter, string tag)
         {
             using var ctx = await OpenAsync(db);
-            var list = await filter(ctx.Cards.AsQueryable().AsNoTracking()).FromCacheAsync(new[] { tag });
-            return list.Count();
-        }
-
-        private static async Task<int> CachedQuestionCountAsync(string db)
-        {
-            using var ctx = await OpenAsync(db);
-            var list = await ctx.Questions.AsQueryable().AsNoTracking().FromCacheAsync(new[] { CacheTags.Quiz });
+            var list = await filter(ctx.Cards.AsQueryable().AsNoTracking()).FromCacheAsync(ctx, $"cards-{tag}", tag);
             return list.Count();
         }
 
         private static async Task<int> CachedPenaltyCountAsync(string db)
         {
             using var ctx = await OpenAsync(db);
-            var list = await ctx.Penalties.AsQueryable().AsNoTracking().FromCacheAsync(new[] { CacheTags.Mute });
+            var list = await ctx.Penalties.AsQueryable().AsNoTracking().FromCacheAsync(ctx, "penalties", CacheTags.Mute);
             return list.Count();
         }
 
@@ -150,26 +142,6 @@ namespace Artifacts
         }
 
         [Fact]
-        public async Task QuizCache_IsInvalidatedWhenQuestionAdded()
-        {
-            var db = NewDb();
-
-            using (var ctx = await OpenAsync(db))
-            {
-                ctx.Questions.Add(new Question { Id = 1 });
-                await ctx.SaveChangesAsync();
-            }
-            Assert.Equal(1, await CachedQuestionCountAsync(db));
-
-            using (var ctx = await OpenAsync(db))
-            {
-                ctx.Questions.Add(new Question { Id = 2 });
-                await ctx.SaveChangesAsync();
-            }
-            Assert.Equal(2, await CachedQuestionCountAsync(db));
-        }
-
-        [Fact]
         public async Task MuteCache_IsInvalidatedWhenPenaltyAdded()
         {
             var db = NewDb();
@@ -240,6 +212,31 @@ namespace Artifacts
         }
 
         [Fact]
+        public async Task CharacterCache_IsInvalidatedWhenTagIsRenamed_WithSyncSave()
+        {
+            var db = NewDb();
+            const ulong character = 70031;
+            const ulong tagId = 501;
+
+            using (var ctx = await OpenAsync(db))
+            {
+                var tag = new Tag { Id = tagId, Name = "stara", GameDeckId = 1 };
+                ctx.Cards.Add(new Card { Id = 1, Character = character, GameDeckId = 1, Tags = new List<Tag> { tag } });
+                ctx.SaveChanges();
+            }
+
+            Assert.Equal("stara", await CachedTagNameAsync(db, character));
+
+            using (var ctx = await OpenAsync(db))
+            {
+                ctx.Tags.First(x => x.Id == tagId).Name = "nowa";
+                ctx.SaveChanges();
+            }
+
+            Assert.Equal("nowa", await CachedTagNameAsync(db, character));
+        }
+
+        [Fact]
         public async Task GuildCache_IsPerGuild_NotSharedAcrossGuilds()
         {
             var db = NewDb();
@@ -272,7 +269,7 @@ namespace Artifacts
         {
             using var ctx = await OpenAsync(db);
             var cards = await ctx.Cards.AsQueryable().Include(x => x.Tags).AsNoTracking()
-                .Where(x => x.Character == character).FromCacheAsync(new[] { CacheTags.Character(character) });
+                .Where(x => x.Character == character).FromCacheAsync(ctx, $"tagged-cards-{character}", CacheTags.Character(character));
             return cards.First().Tags.First().Name;
         }
     }

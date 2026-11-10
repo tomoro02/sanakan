@@ -4,6 +4,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Threading.Tasks;
+using AsyncKeyedLock;
 using Discord;
 using Discord.WebSocket;
 using Microsoft.EntityFrameworkCore;
@@ -11,8 +12,6 @@ using Sanakan.Config;
 using Sanakan.Extensions;
 using Sanakan.Services.Executor;
 using Sanakan.Services.Time;
-using Shinden.Logger;
-using Z.EntityFramework.Plus;
 
 namespace Sanakan.Services
 {
@@ -21,6 +20,7 @@ namespace Sanakan.Services
         private const double SAVE_AT = 5;
         private const double LM = 0.35;
 
+        private readonly AsyncNonKeyedLocker _messageLock = new AsyncNonKeyedLocker(1);
         private Dictionary<ulong, double> _exp;
         private Dictionary<ulong, ulong> _messages;
         private Dictionary<ulong, ulong> _commands;
@@ -58,10 +58,27 @@ namespace Sanakan.Services
         public static long CalculateExpForLevel(long level, double lm = LM) => (level <= 0) ? 0 : Convert.ToInt64(Math.Floor(Math.Pow(level / lm, 2)) + 1);
         public static long CalculateLevel(long exp, double lm = LM) => Convert.ToInt64(Math.Floor(lm * Math.Sqrt(exp)));
 
+        protected virtual Database.DatabaseContext CreateDatabaseContext() => new Database.DatabaseContext(_config);
+
+        public static Discord.Color? GetLevelRoleColor(Database.Models.Configuration.GuildOptions config, SocketGuild guild, long level)
+        {
+            if (config?.RolesPerLevel == null || level <= 0)
+                return null;
+
+            return config.RolesPerLevel.Where(x => x.Level == (ulong)level).Select(x => guild.GetRole(x.Role))
+                .Where(x => x != null).OrderByDescending(x => x.Position).FirstOrDefault()?.Color;
+        }
+
         public async Task NotifyAboutLevelAsync(SocketGuildUser user, ISocketMessageChannel channel, long level)
         {
+            Discord.Color? highlight;
+            using (var db = CreateDatabaseContext())
+            {
+                highlight = GetLevelRoleColor(await db.GetCachedGuildFullConfigAsync(user.Guild.Id), user.Guild, level);
+            }
+
             using (var badge = await _img.GetLevelUpBadgeAsync(user.GetUserNickInGuild(),
-                level, user.GetUserOrDefaultAvatarUrl(true), user.Roles.OrderByDescending(x => x.Position).First().Color))
+                level, user.GetUserOrDefaultAvatarUrl(true), user.Roles.OrderByDescending(x => x.Position).First().Color, highlight))
             {
                 using (var badgeStream = badge.ToWebpStream())
                 {
@@ -80,6 +97,14 @@ namespace Sanakan.Services
             if (_config.Get().BlacklistedGuilds.Any(x => x == user.Guild.Id))
                 return;
 
+            using (await _messageLock.LockAsync().ConfigureAwait(false))
+            {
+                await HandleUserMessageAsync(user, message);
+            }
+        }
+
+        private async Task HandleUserMessageAsync(SocketGuildUser user, SocketMessage message)
+        {
             ulong parentId = 0;
             bool countMsg = true;
             bool calculateExp = false;
@@ -126,6 +151,9 @@ namespace Sanakan.Services
                     }
                 }
 
+                if (!countMsg)
+                    return;
+
                 if (!_messages.Any(x => x.Key == user.Id))
                 {
                     if (!db.Users.AsNoTracking().Any(x => x.Id == user.Id))
@@ -136,11 +164,8 @@ namespace Sanakan.Services
                 }
             }
 
-            if (countMsg)
-            {
-                CountMessage(user.Id, message.Content.IsCommand(_config.Get().Prefix));
-            }
-            CalculateExpAndCreateTask(user, message, calculateExp);
+            CountMessage(user.Id, message.Content.IsCommand(_config.Get().Prefix));
+            await CalculateExpAndCreateTaskAsync(user, message, calculateExp);
         }
 
         private bool CheckLastSave(ulong userId)
@@ -176,34 +201,31 @@ namespace Sanakan.Services
                 _characters[userId] += characters;
         }
 
-        private void CalculateExpAndCreateTask(SocketGuildUser user, SocketMessage message, bool calculateExp)
+        private async Task CalculateExpAndCreateTaskAsync(SocketGuildUser user, SocketMessage message, bool calculateExp)
         {
             var exp = GetPointsFromMsg(message);
             if (!calculateExp) exp = 0;
 
-            if (!_exp.Any(x => x.Key == user.Id))
-            {
-                _exp.Add(message.Author.Id, exp);
-                return;
-            }
-
-            _exp[user.Id] += exp;
-
-            var saved = _exp[user.Id];
-            if (saved < SAVE_AT && !CheckLastSave(user.Id)) return;
+            _exp.TryGetValue(user.Id, out var saved);
+            saved += exp;
+            _exp[user.Id] = saved;
+            var saveDue = CheckLastSave(user.Id);
+            if (saved < SAVE_AT && !saveDue) return;
 
             var fullP = (long) Math.Floor(saved);
-            if (fullP < 1) return;
+            var messages = _messages[user.Id];
+            var commands = _commands[user.Id];
+            var characters = _characters[user.Id];
+            var task = CreateTask(user, message.Channel, fullP, messages, commands, characters, calculateExp);
 
-            _exp[message.Author.Id] -= fullP;
+            if (!await _executor.TryAdd(new Executable("add exp", task, user.Id), TimeSpan.FromSeconds(1)))
+                return;
+
+            _exp[user.Id] -= fullP;
+            _characters[user.Id] -= characters;
+            _messages[user.Id] -= messages;
+            _commands[user.Id] -= commands;
             _saved[user.Id] = _time.Now();
-
-            var task = CreateTask(user, message.Channel, fullP, _messages[user.Id], _commands[user.Id], _characters[user.Id], calculateExp);
-            _characters[user.Id] = 0;
-            _messages[user.Id] = 0;
-            _commands[user.Id] = 0;
-
-            _executor.TryAdd(new Executable("add exp", task, user.Id), TimeSpan.FromSeconds(1));
         }
 
         private double GetPointsFromMsg(SocketMessage message)
@@ -266,89 +288,117 @@ namespace Sanakan.Services
             });
         }
 
+        private void ApplyProgress(Database.Models.User user, long exp, ulong messages, ulong commands, ulong characters)
+        {
+            if ((_time.Now() - user.MeasureDate.AddMonths(1)).TotalSeconds > 1)
+            {
+                user.MeasureDate = new DateTime(_time.Now().Year, _time.Now().Month, 1);
+                user.MessagesCntAtDate = user.MessagesCnt;
+                user.CharacterCntFromDate = characters;
+            }
+            else
+                user.CharacterCntFromDate += characters;
+
+            if (exp > 0)
+                user.ExpCnt += Math.Max(CheckFloodAndReturnExp(exp, user), 1);
+
+            user.MessagesCnt += messages;
+            user.CommandsCnt += commands;
+        }
+
         private Func<Task> CreateTask(SocketGuildUser user, ISocketMessageChannel channel, long exp, ulong messages, ulong commands, ulong characters, bool calculateExp)
         {
-            return new Func<Task>(async () =>
+            return async () =>
             {
-                using (var db = new Database.DatabaseContext(_config) { SuppressCacheInvalidation = true })
+                try
                 {
-                    var usr = await db.GetUserOrCreateSimpleAsync(user.Id);
-                    if (usr == null) return;
-
-                    if ((_time.Now() - usr.MeasureDate.AddMonths(1)).TotalSeconds > 1)
+                    await SaveProgressAsync(user, channel, exp, messages, commands, characters, calculateExp);
+                }
+                catch
+                {
+                    // Return the progress, so the next save includes it.
+                    using (await _messageLock.LockAsync().ConfigureAwait(false))
                     {
-                        usr.MeasureDate = new DateTime(_time.Now().Year, _time.Now().Month, 1);
-                        usr.MessagesCntAtDate = usr.MessagesCnt;
-                        usr.CharacterCntFromDate = characters;
+                        _exp[user.Id] += exp;
+                        _messages[user.Id] += messages;
+                        _commands[user.Id] += commands;
+                        _characters[user.Id] += characters;
                     }
-                    else
-                        usr.CharacterCntFromDate += characters;
+                    throw;
+                }
+            };
+        }
 
-                    exp = CheckFloodAndReturnExp(exp, usr);
-                    if (exp < 1) exp = 1;
+        private async Task SaveProgressAsync(SocketGuildUser user, ISocketMessageChannel channel, long exp, ulong messages, ulong commands, ulong characters, bool calculateExp)
+        {
+            using (var db = CreateDatabaseContext())
+            {
+                db.SuppressCacheInvalidation = true;
+                var usr = await db.GetUserOrCreateSimpleAsync(user.Id);
+                if (usr == null) throw new InvalidOperationException("Experience user was not loaded.");
 
-                    usr.ExpCnt += exp;
-                    usr.MessagesCnt += messages;
-                    usr.CommandsCnt += commands;
+                ApplyProgress(usr, exp, messages, commands, characters);
 
-                    var newLevel = CalculateLevel(usr.ExpCnt);
-                    bool levelChanged = newLevel != usr.Level && calculateExp;
-                    if (levelChanged)
-                    {
-                        usr.Level = newLevel;
-                        await db.UserActivities.AddAsync(new UserActivityBuilder(_time)
-                            .WithUser(usr, user).WithType(Database.Models.ActivityType.LevelUp, (ulong)newLevel).Build());
-                        _ = Task.Run(async () =>
-                        {
-                            try
-                            {
-                                await NotifyAboutLevelAsync(user, channel, newLevel);
-                            }
-                            catch (Exception ex)
-                            {
-                                _logger.LogError($"Experience: level notify: {ex}");
-                            }
-                        });
-                    }
+                var newLevel = CalculateLevel(usr.ExpCnt);
+                bool levelChanged = newLevel != usr.Level && calculateExp && exp > 0;
+                if (levelChanged)
+                {
+                    usr.Level = newLevel;
+                    await db.UserActivities.AddAsync(new UserActivityBuilder(_time)
+                        .WithUser(usr, user).WithType(Database.Models.ActivityType.LevelUp, (ulong)newLevel).Build());
+                }
 
-                    var config = await db.GetCachedGuildFullConfigAsync(user.Guild.Id);
+                await db.SaveChangesAsync();
+
+                if (levelChanged)
+                {
                     _ = Task.Run(async () =>
                     {
                         try
                         {
-                            if (config == null) return;
-                            if (!calculateExp) return;
-
-                            foreach (var lvlRole in config.RolesPerLevel)
-                            {
-                                var role = user.Guild.GetRole(lvlRole.Role);
-                                if (role == null) continue;
-
-                                bool hasRole = user.Roles.Any(x => x.Id == role.Id);
-                                if (newLevel >= (long)lvlRole.Level)
-                                {
-                                    if (!hasRole)
-                                        await user.AddRoleAsync(role);
-                                }
-                                else if (hasRole)
-                                {
-                                    await user.RemoveRoleAsync(role);
-                                }
-                            }
+                            // poziom zmienia się rzadko, a pełny cache usera trzymamy długo - unieważnij go przy awansie
+                            QueryCache.ExpireTag(new string[] { CacheTags.User(usr.Id) });
+                            await NotifyAboutLevelAsync(user, channel, newLevel);
                         }
                         catch (Exception ex)
                         {
-                            _logger.LogError($"Experience: level roles: {ex}");
+                            _logger.LogError($"Exp: level notify: {ex}");
                         }
                     });
-
-                    await db.SaveChangesAsync();
-
-                    // poziom zmienia się rzadko, a pełny cache usera trzymamy długo - unieważnij go przy awansie
-                    if (levelChanged)
-                        QueryCacheManager.ExpireTag(new string[] { CacheTags.User(usr.Id) });
                 }
-            });
+
+                _ = Task.Run(async () =>
+                {
+                    try
+                    {
+                        if (!calculateExp) return;
+                        using var configDb = CreateDatabaseContext();
+                        var config = await configDb.GetCachedGuildFullConfigAsync(user.Guild.Id);
+                        if (config == null) return;
+
+                        foreach (var lvlRole in config.RolesPerLevel)
+                        {
+                            var role = user.Guild.GetRole(lvlRole.Role);
+                            if (role == null) continue;
+
+                            bool hasRole = user.Roles.Any(x => x.Id == role.Id);
+                            if (newLevel >= (long)lvlRole.Level)
+                            {
+                                if (!hasRole)
+                                    await user.AddRoleAsync(role);
+                            }
+                            else if (hasRole)
+                            {
+                                await user.RemoveRoleAsync(role);
+                            }
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogError($"Exp: level roles: {ex}");
+                    }
+                });
+            }
         }
     }
 }

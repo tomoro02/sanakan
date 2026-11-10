@@ -2,6 +2,7 @@
 #pragma warning disable 0169
 
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
@@ -14,10 +15,9 @@ using Sanakan.Config;
 using Sanakan.Database.Models;
 using Sanakan.Extensions;
 using Sanakan.Services.Executor;
+using Sanakan.Services.PocketWaifu;
 using Sanakan.Services.Time;
-using Shinden;
-using Shinden.Logger;
-using Z.EntityFramework.Plus;
+using Sanakan.ShindenCompat;
 
 namespace Sanakan.Services
 {
@@ -25,6 +25,8 @@ namespace Sanakan.Services
     {
         Level, ScCnt, TcCnt, Posts, PostsMonthly, PostsMonthlyCharacter, Commands, Cards, CardsPower, Card, Karma, KarmaNegative, Pvp, PvpSeason, PcCnt, AcCnt
     }
+
+    public sealed record TopEntry(ulong UserId, string Value);
 
     public enum SaveResult
     {
@@ -126,7 +128,7 @@ namespace Sanakan.Services
                 }
                 catch (Exception ex)
                 {
-                    _logger.LogError($"in profile check: {ex}");
+                    _logger.LogError($"Profile: check: {ex}");
                 }
             },
             null,
@@ -279,8 +281,49 @@ namespace Sanakan.Services
             }
         }
 
-        public Task<IEnumerable<User>> GetTopUsers(IQueryable<User> list, TopType type)
-            => OrderUsersByTop(list, type).Take(50).QFromCacheAsync();
+        private const int TopSize = 50;
+        // cards of removed users are kept on this account, it is never shown in the top
+        private const ulong FakeUserId = 1;
+
+        private static readonly Microsoft.Extensions.Caching.Memory.MemoryCacheEntryOptions TopCacheOptions
+            = new Microsoft.Extensions.Caching.Memory.MemoryCacheEntryOptions { AbsoluteExpirationRelativeToNow = TimeSpan.FromHours(6) };
+
+        public Task<List<TopEntry>> GetTopUsers(Database.DatabaseContext db, TopType type)
+            => QueryCache.GetOrLoadAsync(db, $"top-users-{type}", () => LoadTopUsersAsync(db, type), TopCacheOptions);
+
+        private async Task<List<TopEntry>> LoadTopUsersAsync(Database.DatabaseContext db, TopType type)
+        {
+            var users = await OrderUsersByTop(db.Users.AsQueryable().Include(x => x.GameDeck).Where(x => x.Id != FakeUserId).AsNoTracking(), type)
+                .Take(TopSize).ToListAsync();
+
+            var ids = users.Select(x => x.Id).ToList();
+            var cards = db.Cards.AsQueryable().AsNoTracking();
+
+            switch (type)
+            {
+                case TopType.Cards:
+                    var counts = await cards.Where(x => ids.Contains(x.GameDeckId)).GroupBy(x => x.GameDeckId)
+                        .Select(x => new { x.Key, Count = x.Count() }).ToDictionaryAsync(x => x.Key, x => x.Count);
+                    return users.Select(x => new TopEntry(x.Id, $"{counts.GetValueOrDefault(x.Id)}")).ToList();
+
+                case TopType.CardsPower:
+                    var rarities = (await cards.Where(x => ids.Contains(x.GameDeckId)).GroupBy(x => new { x.GameDeckId, x.Rarity })
+                        .Select(x => new { x.Key.GameDeckId, x.Key.Rarity, Count = x.Count() }).ToListAsync()).ToLookup(x => x.GameDeckId);
+                    return users.Select(x => new TopEntry(x.Id, UserExtension.FormatCardCountStats(rarities[x.Id].ToDictionary(r => r.Rarity, r => r.Count)))).ToList();
+
+                case TopType.Card:
+                    var entries = new List<TopEntry>();
+                    foreach (var user in users)
+                    {
+                        var best = await cards.Where(x => x.GameDeckId == user.Id).OrderByDescending(x => x.CardPower).FirstOrDefaultAsync();
+                        entries.Add(new TopEntry(user.Id, best?.GetString(false, false, true) ?? "---"));
+                    }
+                    return entries;
+
+                default:
+                    return users.Select(x => new TopEntry(x.Id, x.GetViewValueForTop(type))).ToList();
+            }
+        }
 
         private IOrderedQueryable<User> OrderUsersByTop(IQueryable<User> list, TopType type)
         {
@@ -337,16 +380,16 @@ namespace Sanakan.Services
             }
         }
 
-        public List<string> BuildListView(IEnumerable<User> list, TopType type, SocketGuild guild)
+        public List<string> BuildListView(IEnumerable<TopEntry> list, SocketGuild guild)
         {
             var view = new List<string>();
 
-            foreach (var user in list)
+            foreach (var entry in list)
             {
-                var bUsr = guild.GetUser(user.Id);
+                var bUsr = guild.GetUser(entry.UserId);
                 if (bUsr == null) continue;
 
-                view.Add($"{bUsr.Mention}: {user.GetViewValueForTop(type)}");
+                view.Add($"{bUsr.Mention}: {entry.Value}");
             }
 
             return view;
@@ -362,7 +405,7 @@ namespace Sanakan.Services
 
         public async Task<SixLabors.ImageSharp.Image> GetProfileImageAsync(SocketGuildUser user, Database.Models.User botUser, long topPosition)
         {
-            global::Shinden.Models.IUserInfo shindenUser = null;
+            global::Sanakan.ShindenCompat.Models.IUserInfo shindenUser = null;
             if (botUser.Shinden != 0)
             {
                 try
@@ -379,6 +422,83 @@ namespace Sanakan.Services
 
             return await _img.GetUserProfileAsync(shindenUser, botUser, user.GetUserOrDefaultAvatarUrl(true),
                 topPosition, user.GetUserNickInGuild(), user.Roles.OrderByDescending(x => x.Position).FirstOrDefault()?.Color ?? Discord.Color.DarkerGrey);
+        }
+
+        private static readonly TimeSpan ReuseSentImage = TimeSpan.FromHours(12);
+        private readonly ConcurrentDictionary<string, (DateTime Written, string Link, DateTime Sent)> _sentImages
+            = new ConcurrentDictionary<string, (DateTime, string, DateTime)>();
+
+        // the code of the profile with links to its own pictures, each one the bot saved sent to the trash channel;
+        // with reuse a picture sent in the last 12 hours and not changed since keeps its link (Discord's last 24 hours)
+        public async Task<ProfileCode> GetProfileCodeWithImagesAsync(Database.Models.User user, ITextChannel trash, bool reuse)
+        {
+            var code = ProfileCode.FromUser(user);
+            var current = new List<(ProfileImage Image, string Uri)>
+            {
+                (ProfileImage.Background, user.BackgroundProfileUri),
+                (ProfileImage.Overlay, user.CustomProfileOverlayUrl),
+                (ProfileImage.Premium, user.PremiumCustomProfileOverlayUrl),
+            };
+            if (ProfileConfig.StyleNeedsImage(user.ProfileType))
+                current.Add((ProfileImage.Style, user.StatsReplacementProfileUri));
+
+            foreach (var (image, uri) in current)
+            {
+                var link = await ImageLinkAsync(trash, uri, image, reuse);
+                if (link != null)
+                    code.Images[image] = link;
+            }
+            return code;
+        }
+
+        // the bot's own pictures (the default background) are no image of the account; a picture still kept
+        // as a link of another site (set before the bot saved them) goes to the trash channel too, as Profilator
+        // shows only Discord's pictures, and is left out once the link is dead
+        private async Task<string> ImageLinkAsync(ITextChannel trash, string uri, ProfileImage image, bool reuse)
+        {
+            if (string.IsNullOrEmpty(uri) || uri.StartsWith(Dir.GetResource(""), StringComparison.Ordinal))
+                return null;
+
+            var local = Dir.IsLocal(uri);
+            if (local ? !File.Exists(uri) : !Uri.TryCreate(uri, UriKind.Absolute, out _))
+                return null;
+
+            var written = local ? File.GetLastWriteTimeUtc(uri) : DateTime.MinValue;
+            var now = _time.Now();
+            if (reuse && _sentImages.TryGetValue(uri, out var sent) && sent.Written == written && now - sent.Sent < ReuseSentImage)
+                return sent.Link;
+
+            var path = local ? uri : Path.Combine(Path.GetTempPath(), $"{Guid.NewGuid():N}.webp");
+            try
+            {
+                if (!local)
+                {
+                    var (width, height, stretch) = image switch
+                    {
+                        ProfileImage.Background => (750, 160, true),
+                        ProfileImage.Style => (750, 340, false),
+                        ProfileImage.Overlay => (750, 402, false),
+                        _ => (750, 500, false),
+                    };
+                    if (await SaveProfileImageAsync(uri, path, width, height, stretch) != SaveResult.Success || !File.Exists(path))
+                        return null;
+                }
+
+                var message = await trash.SendFileAsync(path);
+                var link = message.Attachments.FirstOrDefault()?.Url;
+                if (link != null)
+                    _sentImages[uri] = (written, link, now);
+                return link;
+            }
+            catch (Exception)
+            {
+                return null;
+            }
+            finally
+            {
+                if (!local && File.Exists(path))
+                    File.Delete(path);
+            }
         }
 
         public async Task<SaveResult> SaveProfileAndStyleImageAsync(string imgUrl, string pathTop, int widthTop, int heightTop, string pathBot, int widthBot, int heightBot)

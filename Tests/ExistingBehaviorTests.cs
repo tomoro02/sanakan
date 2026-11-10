@@ -3,8 +3,8 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Threading.Tasks;
 using Discord.WebSocket;
-using Microsoft.Extensions.Caching.Memory;
 using Sanakan.Api.Controllers;
+using Sanakan.Api.Models;
 using Sanakan.Database.Models;
 using Sanakan.Extensions;
 using Sanakan.Services.Executor;
@@ -67,6 +67,82 @@ namespace Artifacts
             var first = NewWaifu().GetItemsWithCost().First();
             Assert.Equal(3, first.Cost);
             Assert.Equal(ItemType.AffectionRecoverySmall, first.Item.Type);
+        }
+
+        [Fact]
+        public void Lottery_GivesTenTimesLessTcThanCt()
+        {
+            Assert.Equal(new[] { 5, 10, 15, 20, 30 }, Lottery.GetTcRewardChances().Select(x => x.Item1).OrderBy(x => x));
+            Assert.Equal(new[] { 50, 100, 150, 200, 300 }, Lottery.GetMoneyRewardChances().Select(x => x.Item1).OrderBy(x => x));
+            Assert.Equal(Lottery.GetMoneyRewardChances().OrderBy(x => x.Item1).Select(x => x.Item2), Lottery.GetTcRewardChances().OrderBy(x => x.Item1).Select(x => x.Item2));
+        }
+
+        [Fact]
+        public void LotteryCounts_IncludeBothEnds()
+        {
+            var rolls = Enumerable.Range(0, 3000).Select(_ => Lottery.RollCount(1, 5)).ToList();
+
+            Assert.Equal(1, rolls.Min());
+            Assert.Equal(5, rolls.Max());
+            Assert.Equal(10, Lottery.MaxFigureParts(Quality.Delta));
+            Assert.Equal(5, Lottery.MaxFigureParts(Quality.Jota));
+            Assert.Equal(2, Lottery.MaxFigureParts(Quality.Omega));
+            Assert.Equal((5, 15), (Lottery.MinPills, Lottery.MaxPills));
+        }
+
+        [Fact]
+        public void ExpeditionMoreItems_IncludesBothEnds()
+        {
+            var events = (Events)System.Runtime.Serialization.FormatterServices.GetUninitializedObject(typeof(Events));
+            var rolls = Enumerable.Range(0, 5000).Select(_ => events.GetMoreItems(EventType.MoreItems)).ToList();
+
+            Assert.Equal(2, rolls.Min());
+            Assert.Equal(22, rolls.Max());
+            Assert.Equal(0, events.GetMoreItems(EventType.None));
+        }
+
+        private static List<BoosterPack> MixedPacks() => new[] { "Aktywność", "Wyprawa", "Aktywność", "Loteria", "Wyprawa", "Aktywność" }
+            .Select((name, i) => new BoosterPack { Id = (ulong)(10 - i), Name = name }).Reverse().ToList();
+
+        [Fact]
+        public void DiscordPackList_GroupsSameNames_InTheOrderTheyFirstCame()
+        {
+            var ordered = Waifu.OrderPacksForNumbering(MixedPacks());
+
+            Assert.Equal(new[] { "Aktywność", "Aktywność", "Aktywność", "Wyprawa", "Wyprawa", "Loteria" }, ordered.Select(x => x.Name));
+            Assert.Equal(new[] { "**[1-3]** Aktywność", "**[4-5]** Wyprawa", "**[6]** Loteria" }, Waifu.GetBoosterPackLines(ordered));
+        }
+
+        [Fact]
+        public void DiscordPackOpening_UsesTheSameNumbersAsTheList()
+        {
+            var ordered = Waifu.OrderPacksForNumbering(MixedPacks());
+
+            // "s.pakiet 4 2" opens both expedition packs, the oldest one first
+            var opened = ordered.GetRange(4 - 1, 2);
+            Assert.All(opened, x => Assert.Equal("Wyprawa", x.Name));
+            Assert.True(opened[0].Id < opened[1].Id);
+            Assert.Equal(MixedPacks().Min(x => x.Id), ordered[0].Id);
+        }
+
+        [Fact]
+        public void ApiPackList_NumbersMatchDiscordAndApiOpening()
+        {
+            var ordered = Waifu.OrderPacksForNumbering(MixedPacks());
+            var listed = ordered.Select((x, i) => UserBoosterPack.From(x, i + 1)).ToList();
+
+            Assert.Equal(new[] { "Aktywność", "Aktywność", "Aktywność", "Wyprawa", "Wyprawa", "Loteria" }, listed.Select(x => x.Name));
+            Assert.All(listed, x => Assert.Equal(x.Id, ordered[x.Number - 1].Id));
+        }
+
+        [Fact]
+        public void NormalShop_SellsGlassesLast_SoOlderItemNumbersStay()
+        {
+            var items = NewWaifu().GetItemsWithCost();
+
+            Assert.Equal(ItemType.ChangeBorderVariant, items[^2].Item.Type);
+            Assert.Equal(ItemType.IncreasePrecision, items[^1].Item.Type);
+            Assert.Equal(99, items[^1].Cost);
         }
 
         [Fact]
@@ -321,7 +397,7 @@ namespace Artifacts
     {
         private static WaifuController NewWaifuController(FakeExecutor executor)
             => ControllerHarness.Attach(new WaifuController(null, null, executor, null, new FakeConfig(), new FixedTime(),
-                new MemoryCache(new MemoryCacheOptions()), null, null));
+                new Sanakan.Services.Shinden(null, null, null, new ListLogger(), new FixedTime()), null, null, null));
 
         [Fact]
         public async Task UpdateCardInfo_EnqueuesTaskAndReturnsOk()
@@ -355,13 +431,6 @@ namespace Artifacts
             var result = await controller.GiveShindenUserAPacksAndOpenAsync(5, new List<Sanakan.Api.Models.CardBoosterPack>());
             Assert.Null(result.Value);
             Assert.Equal(500, result.StatusOf());
-        }
-
-        [Fact]
-        public void RichMessage_ExampleIsAvailable()
-        {
-            var controller = ControllerHarness.Attach(new RichMessageController(null, new FakeConfig(), new ListLogger()));
-            Assert.NotNull(controller.GetExampleMsg().Value);
         }
     }
 }

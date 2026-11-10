@@ -1,6 +1,8 @@
 ﻿#pragma warning disable 1591
 
 using System.Collections.Generic;
+using Newtonsoft.Json;
+using Newtonsoft.Json.Converters;
 
 namespace Sanakan.Config.Model
 {
@@ -12,6 +14,8 @@ namespace Sanakan.Config.Model
         public bool Demonization { get; set; }
         public bool SafariEnabled { get; set; }
         public bool AutoCleanCards { get; set; }
+        [JsonConverter(typeof(StringEnumConverter))]
+        public DatabaseProvider DatabaseProvider { get; set; } = DatabaseProvider.MySql;
         public string ConnectionString { get; set; }
         public long CharPerPacket { get; set; }
         public long PacksPerDay { get; set; }
@@ -22,9 +26,11 @@ namespace Sanakan.Config.Model
         public bool GiveBanForUrlSpam { get; set; }
         public List<SanakanApiKey> ApiKeys { get; set; }
         public List<ApiApp> UserKeyApps { get; set; }
-        public List<RichMessageConfig> RMConfig { get; set; }
+        public List<LogChannelConfig> AdminNotifyChannels { get; set; }
         public List<ulong> BlacklistedGuilds { get; set; }
-        public LogChannelConfig LogChannel { get; set; } = new LogChannelConfig { GuildId = 428569745579704321, ChannelId = 1556085068051513394 };
+        public LogChannelConfig LogChannel { get; set; } = new LogChannelConfig { GuildId = 428569745579704321, ChannelId = 1556085068051513394, ErrorRoleId = 612125835721179146 };
         public HeartbeatConfig Heartbeat { get; set; }
+        public IngestConfig Ingest { get; set; }
+        public int ScamImageMaxDistance { get; set; } = 6;
     }
 }

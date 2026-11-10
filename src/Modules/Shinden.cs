@@ -1,6 +1,7 @@
 ﻿#pragma warning disable 1591
 
 using System;
+using System.IO;
 using System.Linq;
 using System.Threading.Tasks;
 using Discord.Commands;
@@ -12,8 +13,7 @@ using Sanakan.Services.Commands;
 using Sanakan.Services.Session;
 using Sanakan.Services.Session.Models;
 using Sanakan.Services.Time;
-using Z.EntityFramework.Plus;
-using Shden = Shinden;
+using Shden = Sanakan.ShindenCompat;
 
 namespace Sanakan.Modules
 {
@@ -59,7 +59,11 @@ namespace Sanakan.Modules
                     }
                     catch (Exception ex)
                     {
-                        await msg.ModifyAsync(x => x.Embed = $"{Context.User.Mention} nie udało się wysłać PW! ({ex.Message})".ToEmbedMessage(EMType.Error).Build());
+                        var reason = Services.Helper.IsDmClosed(ex) ? Services.Helper.DmClosed : Services.Helper.DmFailedText;
+                        if (!Services.Helper.IsDmClosed(ex))
+                            Logger?.LogError($"Shinden: episodes DM u{Context.User.Id}: {ex}");
+
+                        await msg.ModifyAsync(x => x.Embed = $"{Context.User.Mention} {reason}".ToEmbedMessage(EMType.Error).Build());
                     }
 
                     return;
@@ -105,7 +109,7 @@ namespace Sanakan.Modules
             var response = await _shclient.Search.CharacterAsync(name);
             if (!response.IsSuccessStatusCode())
             {
-                await SafeReplyAsync("", embed: _shinden.GetResponseFromSearchCode(response).ToEmbedMessage(EMType.Error).Build());
+                await SafeReplyAsync("", embed: _shinden.GetResponseFromSearchCode(response.Code).ToEmbedMessage(EMType.Error).Build());
                 return;
             }
 
@@ -142,18 +146,27 @@ namespace Sanakan.Modules
             await _shinden.SendSearchResponseAsync(Context, toSend, session);
         }
 
-        [Command("strona", RunMode = RunMode.Async)]
+        public const string SiteCommand = "strona";
+        public static readonly TimeSpan SiteCooldown = TimeSpan.FromMinutes(5);
+
+        public static string SavedSiteNote(DateTime savedAt, DateTime availableAt)
+            => $"Zapisane statystyki z {savedAt.ToRemTime()} · nowe wygenerujesz {availableAt.ToRemTime()}";
+
+        public static string SavedSiteOnErrorNote(DateTime savedAt)
+            => $"Shinden nie odpowiada, pokazuję zapisane statystyki z {savedAt.ToRemTime()}.";
+
+        [Command(SiteCommand, RunMode = RunMode.Async)]
         [Alias("ile", "otaku", "site", "mangozjeb")]
         [Summary("wyświetla statystyki użytkownika ze strony")]
-        [Remarks("Karna"), DelayNextUseBy(30)]
+        [Remarks("Karna")]
         public async Task ShowSiteStatisticAsync([Summary("nazwa użytkownika")]SocketGuildUser user = null)
         {
             var usr = user ?? Context.User as SocketGuildUser;
-            if (usr == null) return;
+            if (usr == null || Context.User is not SocketGuildUser caller) return;
 
             using (var db = new Database.DatabaseContext(Config))
             {
-                var botUser = await db.GetCachedFullUserAsync(usr.Id);
+                var botUser = await db.GetCachedNoGameDeckUserAsync(usr.Id);
                 if (botUser == null)
                 {
                     await SafeReplyAsync("", embed: "Ta osoba nie ma profilu bota.".ToEmbedMessage(EMType.Error).Build());
@@ -166,14 +179,51 @@ namespace Sanakan.Modules
                     return;
                 }
 
+                var link = new Discord.ComponentBuilder()
+                    .WithButton("Shinden", style: Discord.ButtonStyle.Link, url: Shden.Url.GetProfileURL(botUser.Shinden))
+                    .WithButton("Alter", style: Discord.ButtonStyle.Link, url: botUser.GetAlterProfileUrl())
+                    .WithButton("Lista anime", style: Discord.ButtonStyle.Link, url: Shden.Url.GetAnimeListURL(botUser.Shinden))
+                    .WithButton("Lista mangi", style: Discord.ButtonStyle.Link, url: Shden.Url.GetMangaListURL(botUser.Shinden))
+                    .Build();
+
+                var savedPath = $"{Services.Dir.SiteStatistics}/{usr.Id}.webp";
+                var availableAt = await DelayNextUseBy.TryUseAsync(caller, SiteCommand, SiteCooldown, Config, _time);
+                if (availableAt != null)
+                {
+                    if (!await TrySendSavedImageAsync(savedPath, savedAt => SavedSiteNote(savedAt, availableAt.Value), link))
+                        await SafeReplyAsync("", embed: DelayNextUseBy.CooldownMessage(caller, availableAt.Value).ToEmbedMessage(EMType.Error).Build());
+                    return;
+                }
+
+                Stream stream;
                 try
                 {
-                    using var stream = await _shinden.GetSiteStatisticAsync(botUser.Shinden, usr);
-                    await Context.Channel.SendFileAsync(stream, $"{usr.Id}.webp", $"<{Shden.API.Url.GetProfileURL(botUser.Shinden)}>");
+                    stream = await _shinden.GetSiteStatisticAsync(botUser.Shinden, usr);
                 }
                 catch(Exception ex)
                 {
-                    await SafeReplyAsync("", embed: $"Brak połączenia z Shindenem! ({ex.Message})".ToEmbedMessage(EMType.Error).Build());
+                    Logger?.LogError($"Shinden: user stats u{usr.Id}: {ex}");
+                    DelayNextUseBy.Release(SiteCommand, caller.Id);
+
+                    if (!await TrySendSavedImageAsync(savedPath, SavedSiteOnErrorNote, link))
+                        await SafeReplyAsync("", embed: "Brak połączenia z Shindenem! Spróbuj ponownie za chwilę.".ToEmbedMessage(EMType.Error).Build());
+                    return;
+                }
+
+                using (stream)
+                {
+                    try
+                    {
+                        using (var file = File.Create(savedPath))
+                            await stream.CopyToAsync(file);
+                    }
+                    catch (Exception ex)
+                    {
+                        Logger?.LogError($"Shinden: saving user stats u{usr.Id}: {ex.Message}");
+                    }
+
+                    stream.Position = 0;
+                    await Context.Channel.SendFileAsync(stream, $"{usr.Id}.webp", components: link);
                 }
             }
         }
@@ -199,14 +249,15 @@ namespace Sanakan.Modules
                     break;
             }
 
-            Shden.API.IResponse<Shden.Models.IUserInfo> response;
+            Shden.Response<Shden.Models.IUserInfo> response;
             try
             {
                 response = await _shclient.User.GetAsync(shindenId);
             }
             catch (Exception ex)
             {
-                await SafeReplyAsync("", embed: $"Brak połączenia z Shindenem! ({ex.Message})".ToEmbedMessage(EMType.Error).Build());
+                Logger?.LogError($"Shinden: user {shindenId}: {ex}");
+                await SafeReplyAsync("", embed: "Brak połączenia z Shindenem! Spróbuj ponownie za chwilę.".ToEmbedMessage(EMType.Error).Build());
                 return;
             }
 
@@ -217,7 +268,8 @@ namespace Sanakan.Modules
 
                 if (!user.Name.Equals(userNameInDiscord))
                 {
-                    await SafeReplyAsync("", embed: "Wykryto próbę podszycia się. Nieładnie!".ToEmbedMessage(EMType.Error).Build());
+                    await SafeReplyAsync("", embed: $"Nick na serwerze (**{Discord.Format.Sanitize(userNameInDiscord)}**) musi być taki sam jak na Shindenie (**{Discord.Format.Sanitize(user.Name)}**). Zmień nick i spróbuj ponownie."
+                        .ToEmbedMessage(EMType.Error).Build());
                     return;
                 }
 
@@ -245,14 +297,17 @@ namespace Sanakan.Modules
 
                     await db.SaveChangesAsync();
 
-                    QueryCacheManager.ExpireTag(new string[] { CacheTags.User(botuser.Id) });
+                    QueryCache.ExpireTag(new string[] { CacheTags.User(botuser.Id) });
                 }
 
                 await SafeReplyAsync("", embed: "Konta zostały połączone.".ToEmbedMessage(EMType.Success).Build());
                 return;
             }
 
-            await SafeReplyAsync("", embed: $"Brak połączenia z Shindenem! ({response.Code})".ToEmbedMessage(EMType.Error).Build());
+            var error = response.Code == System.Net.HttpStatusCode.NotFound
+                ? "Nie znaleziono takiego konta na Shindenie. Sprawdź link do profilu."
+                : "Brak połączenia z Shindenem! Spróbuj ponownie za chwilę.";
+            await SafeReplyAsync("", embed: error.ToEmbedMessage(EMType.Error).Build());
         }
     }
 }

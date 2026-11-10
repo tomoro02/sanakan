@@ -14,10 +14,8 @@ using Sanakan.Extensions;
 using Sanakan.Services.PocketWaifu.Fight;
 using Sanakan.Services.Time;
 using AsyncKeyedLock;
-using Shinden;
-using Shinden.Logger;
-using Shinden.Models;
-using Z.EntityFramework.Plus;
+using Sanakan.ShindenCompat;
+using Sanakan.ShindenCompat.Models;
 using System.Threading;
 using Sanakan.Config;
 using System.Net;
@@ -59,12 +57,7 @@ namespace Sanakan.Services.PocketWaifu
         public const string AnimatedCardExtension = "webp";
         public const string NormalCardExtension = "webp";
 
-        private AsyncNonKeyedLocker _semaphoreChars = new AsyncNonKeyedLocker(1);
-
         private const int DERE_TAB_SIZE = ((int)Dere.Yato) + 1;
-        private static CharacterPool<ICharacterInfoTitle> _charIdAnime = new CharacterPool<ICharacterInfoTitle>();
-        private static CharacterPool<ICharacterInfoTitle> _charIdManga = new CharacterPool<ICharacterInfoTitle>();
-        private static CharacterPool<ICharacterInfoTitle> _charIdAll = new CharacterPool<ICharacterInfoTitle>();
         private DateTime _hiddeScalpelBeforeDate = new DateTime(2023, 5, 1);
 
         private static List<string> _qualityNamesList = Enum.GetNames(typeof(Quality)).ToList();
@@ -309,18 +302,20 @@ namespace Sanakan.Services.PocketWaifu
 
         private static double[,] _dereDmgRelation = new double[DERE_TAB_SIZE, DERE_TAB_SIZE]
         {
+            // Yato is a fusion of Yami and Raito: against normal characters it leans to the stronger parent,
+            // to both parents it is the same x1.5 both ways, and against itself x0.5 like each parent
             //Tsundere, Kamidere, Deredere, Yandere, Dandere, Kuudere, Mayadere, Bodere, Yami, Raito, Yato
             { 0.5,      2,        2,        2,       2,       2,       2,        2,      3,    3,     3     }, //Tsundere
-            { 1,        0.5,      2,        0.5,     1,       1,       1,        1,      2,    1,     2     }, //Kamidere
-            { 1,        1,        0.5,      2,       0.5,     1,       1,        1,      2,    1,     2     }, //Deredere
-            { 1,        1,        1,        0.5,     2,       0.5,     1,        1,      2,    1,     2     }, //Yandere
-            { 1,        1,        1,        1,       0.5,     2,       0.5,      1,      2,    1,     2     }, //Dandere
-            { 1,        1,        1,        1,       1,       0.5,     2,        0.5,    2,    1,     2     }, //Kuudere
-            { 1,        0.5,      1,        1,       1,       1,       0.5,      2,      2,    1,     2     }, //Mayadere
-            { 1,        2,        0.5,      1,       1,       1,       1,        0.5,    2,    1,     2     }, //Bodere
-            { 1,        1,        1,        1,       1,       1,       1,        1,      0.5,  3,     2     }, //Yami
-            { 0.5,      0.5,      0.5,      0.5,     0.5,     0.5,     0.5,      0.5,    3,    0.5,   1     }, //Raito
-            { 0.5,      0.5,      0.5,      0.5,     0.5,     0.5,     0.5,      0.5,    1,    0.5,   1     }, //Yato
+            { 1,        0.5,      2,        0.5,     1,       1,       1,        1,      2,    1,     1.75  }, //Kamidere
+            { 1,        1,        0.5,      2,       0.5,     1,       1,        1,      2,    1,     1.75  }, //Deredere
+            { 1,        1,        1,        0.5,     2,       0.5,     1,        1,      2,    1,     1.75  }, //Yandere
+            { 1,        1,        1,        1,       0.5,     2,       0.5,      1,      2,    1,     1.75  }, //Dandere
+            { 1,        1,        1,        1,       1,       0.5,     2,        0.5,    2,    1,     1.75  }, //Kuudere
+            { 1,        0.5,      1,        1,       1,       1,       0.5,      2,      2,    1,     1.75  }, //Mayadere
+            { 1,        2,        0.5,      1,       1,       1,       1,        0.5,    2,    1,     1.75  }, //Bodere
+            { 1,        1,        1,        1,       1,       1,       1,        1,      0.5,  3,     1.5   }, //Yami
+            { 0.5,      0.5,      0.5,      0.5,     0.5,     0.5,     0.5,      0.5,    3,    0.5,   1.5   }, //Raito
+            { 0.5,      0.6,      0.6,      0.6,     0.6,     0.6,     0.6,      0.6,    1.5,  1.5,   0.5   }, //Yato
         };
 
         private Timer _timer;
@@ -362,7 +357,7 @@ namespace Sanakan.Services.PocketWaifu
                 }
                 catch (Exception ex)
                 {
-                    _logger.LogError($"in waifu - clean cards: {ex}");
+                    _logger.LogError($"Waifu: clean cards: {ex}");
                 }
             },
             null,
@@ -465,7 +460,15 @@ namespace Sanakan.Services.PocketWaifu
             return collectionInfo;
         }
 
-        static public double GetDereDmgMultiplier(Card atk, Card def) => _dereDmgRelation[(int)def.Dere, (int)atk.Dere];
+        static public double GetDereDmgMultiplier(Card atk, Card def) => GetDereDmgMultiplier(atk.Dere, def.Dere);
+
+        static public double GetDereDmgMultiplier(Dere atk, Dere def)
+        {
+            var multiplier = _dereDmgRelation[(int)def, (int)atk];
+            if (def == Dere.Kamidere) multiplier = Math.Min(multiplier, 1);
+            if (atk == Dere.Mayadere) multiplier = Math.Max(multiplier, 1);
+            return multiplier;
+        }
 
         public ItemRecipe GetItemRecipe(RecipeType type) => _recipes[type];
 
@@ -509,7 +512,7 @@ namespace Sanakan.Services.PocketWaifu
                 }
                 catch (Exception ex)
                 {
-                    _logger.LogError($"CleanCards: {filePath}: {ex.Message}");
+                    _logger.LogError($"Waifu: clean cards: {filePath}: {ex.Message}");
                 }
             }
             return deletedImages;
@@ -545,28 +548,28 @@ namespace Sanakan.Services.PocketWaifu
 
                 case HaremType.Tag:
                     {
-                        var nList = new List<Card>();
+                        var nList = list.ToList();
                         var tagList = tag.Split("|").First().Split(" ").ToList();
                         foreach (var t in tagList)
                         {
                             if (t.Length < 1)
                                 continue;
 
-                            nList = list.Where(x => x.Tags.Any(c => c.Name.Equals(t, StringComparison.CurrentCultureIgnoreCase))).ToList();
+                            nList = nList.Where(x => x.Tags.Any(c => c.Name.Equals(t, StringComparison.CurrentCultureIgnoreCase))).ToList();
                         }
                         return nList;
                     }
 
                 case HaremType.NoTag:
                     {
-                        var nList = new List<Card>();
+                        var nList = list.ToList();
                         var tagList = tag.Split("|").First().Split(" ").ToList();
                         foreach (var t in tagList)
                         {
                             if (t.Length < 1)
                                 continue;
 
-                            nList = list.Where(x => !x.Tags.Any(c => c.Name.Equals(t, StringComparison.CurrentCultureIgnoreCase))).ToList();
+                            nList = nList.Where(x => !x.Tags.Any(c => c.Name.Equals(t, StringComparison.CurrentCultureIgnoreCase))).ToList();
                         }
                         return nList;
                     }
@@ -598,6 +601,8 @@ namespace Sanakan.Services.PocketWaifu
             return Rarity.E;
         }
 
+        public static readonly Rarity[] DrawableRarities = { Rarity.SS, Rarity.S, Rarity.A, Rarity.B, Rarity.C, Rarity.D, Rarity.E };
+
         public Rarity RandomizeRarity(List<Rarity> rarityExcluded)
         {
             if (rarityExcluded == null) return RandomizeRarity();
@@ -616,6 +621,9 @@ namespace Sanakan.Services.PocketWaifu
 
             var ex = list.Where(x => rarityExcluded.Any(c => c == x.Rarity)).ToList();
             foreach (var e in ex) list.Remove(e);
+
+            // packs saved before the api rejected this would otherwise never open
+            if (list.Count == 0) return RandomizeRarity();
 
             var num = Fun.GetRandomValue(1000);
             foreach (var rar in list)
@@ -642,7 +650,7 @@ namespace Sanakan.Services.PocketWaifu
 
         public Item RandomizeItemFromMarketUlt(Card card)
         {
-            var cardQuality = card.Quality.Fake(card.BorderOverflow);
+            var cardQuality = card.GetEffectiveQuality();
             var itemType = Fun.GetOneRandomFrom(_ultMarketItems);
             var itemQuality = Fun.GetOneRandomFrom(_ultMarket[cardQuality]);
             return itemType.ToItem(1, itemQuality);
@@ -686,6 +694,7 @@ namespace Sanakan.Services.PocketWaifu
                 new ItemWithCost(444,   ItemType.GiveTagSlot.ToItem()),
                 new ItemWithCost(99999, ItemType.NotAnItem.ToItem()),
                 new ItemWithCost(55,    ItemType.ChangeBorderVariant.ToItem()),
+                new ItemWithCost(99,    ItemType.IncreasePrecision.ToItem()),
             };
         }
 
@@ -705,6 +714,7 @@ namespace Sanakan.Services.PocketWaifu
                 new ItemWithCost(11999, ItemType.BloodOfYourWaifu.ToItem()),
                 new ItemWithCost(1599,  ItemType.ChangeStarType.ToItem()),
                 new ItemWithCost(11999, ItemType.RandomBoosterPackSingleE.ToItem()),
+                new ItemWithCost(999,   ItemType.IncreasePrecision.ToItem()),
             };
         }
 
@@ -1038,7 +1048,7 @@ namespace Sanakan.Services.PocketWaifu
 
                 await db.SaveChangesAsync();
 
-                QueryCacheManager.ExpireTag(new string[] { CacheTags.User(bUser.Id) });
+                QueryCache.ExpireTag(new string[] { CacheTags.User(bUser.Id) });
 
                 return $"{discordUser.Mention} zakupił: _{thisItem.Item.Name}{boosterPackTitleName}{count}_.".ToEmbedMessage(EMType.Success).Build();
             }
@@ -1073,8 +1083,8 @@ namespace Sanakan.Services.PocketWaifu
 
         static public FightWinner GetFightWinner(Card card1, Card card2)
         {
-            var FAcard1 = GetFA(card1, card2);
-            var FAcard2 = GetFA(card2, card1);
+            var FAcard1 = GetExpectedFA(card1, card2);
+            var FAcard2 = GetExpectedFA(card2, card1);
 
             var c1Health = card1.GetHealthWithPenalty();
             var c2Health = card2.GetHealthWithPenalty();
@@ -1088,7 +1098,9 @@ namespace Sanakan.Services.PocketWaifu
             return winner;
         }
 
-        static public double GetFA(Card target, Card enemy)
+        public const double UltimateMinDamageShare = 0.15;
+
+        static public double GetFA(Card target, Card enemy, bool critical = false)
         {
             double atk1 = target.GetAttackWithBonus();
             if (!target.HasImage()) atk1 -= atk1 * 20 / 100;
@@ -1096,17 +1108,37 @@ namespace Sanakan.Services.PocketWaifu
             double def2 = enemy.GetDefenceWithBonus();
             if (!enemy.HasImage()) def2 -= def2 * 20 / 100;
 
-            var realAtk1 = atk1 - def2;
-            if (!target.FromFigure && !enemy.FromFigure)
+            return GetBaseDamage(atk1, def2, target.FromFigure || enemy.FromFigure, critical) * GetDereDmgMultiplier(target, enemy);
+        }
+
+        // average damage with critical hits counted in, for fights resolved without rolling
+        static public double GetExpectedFA(Card target, Card enemy)
+        {
+            var chance = target.GetCritChance() / 100;
+            return (1 - chance) * GetFA(target, enemy) + chance * GetFA(target, enemy, true);
+        }
+
+        public const double CriticalMultiplier = 1.5;
+
+        // normal cards treat defence as a percentage, once an ultimate card fights it is subtracted from the attack
+        static public double GetBaseDamage(double attack, double defence, bool ultimateInvolved, bool critical = false)
+        {
+            double damage;
+            if (!ultimateInvolved)
             {
-                if (def2 > 99) def2 = 99;
-                realAtk1 = atk1 * (100 - def2) / 100;
+                // halving a percentage defence would multiply the damage many times, so a critical hit only multiplies it
+                if (defence > 99) defence = 99;
+                damage = attack * (100 - defence) / 100;
             }
-            if (realAtk1 < 1) realAtk1 = 1;
+            else
+            {
+                if (critical) defence /= 2;
+                // defence above the enemy's attack would make an ultimate card almost immortal
+                damage = Math.Max(attack - defence, attack * UltimateMinDamageShare);
+            }
 
-            realAtk1 *= GetDereDmgMultiplier(target, enemy);
-
-            return realAtk1;
+            if (damage < 1) damage = 1;
+            return critical ? damage * CriticalMultiplier : damage;
         }
 
         static public int RandomizeAttack(Rarity rarity)
@@ -1327,9 +1359,51 @@ namespace Sanakan.Services.PocketWaifu
             return nDef;
         }
 
-        private double GetDmgDeal(Card c1, Card c2)
+        public static bool Strike(RoundInfo round, CardWithHealth attacker, CardWithHealth target, bool secondStrike)
         {
-            return GetFA(c1, c2);
+            var info = new AttackInfo { AtkCardId = attacker.Card.Id, DefCardId = target.Card.Id, SecondStrike = secondStrike };
+            round.Fights.Add(info);
+
+            if (target.Card.Dere == Dere.Dandere && Fun.TakeATry(DereAbility.DandereDodgeChance))
+            {
+                info.Dodged = true;
+                info.TargetHp = target.Health;
+                return false;
+            }
+
+            info.Critical = Fun.TakeATry(attacker.Card.GetCritChance());
+            var dmg = GetFA(attacker.Card, target.Card, info.Critical);
+            if (attacker.Card.Dere == Dere.Yandere && attacker.Health < attacker.MaxHealth * DereAbility.YandereRageBelow)
+            {
+                dmg *= DereAbility.YandereRageMultiplier;
+                info.Rage = true;
+            }
+            if (target.Card.Dere == Dere.Tsundere && target.Health < target.MaxHealth * DereAbility.TsundereGuardBelow)
+            {
+                dmg *= DereAbility.TsundereGuardMultiplier;
+                info.Guarded = true;
+            }
+
+            info.Dmg = dmg;
+            target.Health -= dmg;
+            if (target.Health < 1)
+                target.Health = 0;
+
+            if (target.Card.Dere == Dere.Deredere && !target.Healed && target.Health > 0 && target.Health < target.MaxHealth * DereAbility.DeredereHealBelow)
+            {
+                target.Health += target.MaxHealth * DereAbility.DeredereHeal;
+                target.Healed = true;
+                info.Healed = true;
+            }
+            info.TargetHp = target.Health;
+
+            var hpSnap = round.Cards.FirstOrDefault(x => x.CardId == target.Card.Id);
+            if (hpSnap == null)
+                round.Cards.Add(new HpSnapshot { CardId = target.Card.Id, Hp = target.Health });
+            else
+                hpSnap.Hp = target.Health;
+
+            return true;
         }
 
         public string GetDeathLog(FightHistory fight, List<PlayerInfo> players)
@@ -1344,12 +1418,111 @@ namespace Sanakan.Services.PocketWaifu
                     foreach (var d in dead)
                     {
                         var thisCard = players.First(x => x.Cards.Any(c => c.Id == d.CardId)).Cards.First(x => x.Id == d.CardId);
-                        deathLog += $"❌ {thisCard.GetString(true, false, true, true)}\n";
+                        deathLog += $"❌ {thisCard.GetString(true, false, true, true, hideStats: true)}\n";
                     }
                     deathLog += "\n";
                 }
             }
-            return deathLog;
+            return deathLog + CriticalHitsLine(fight, players) + AbilitiesLine(fight, players);
+        }
+
+        public static string AbilitiesLine(FightHistory fight, List<PlayerInfo> players)
+        {
+            var attacks = fight.Rounds.SelectMany(x => x.Fights).ToList();
+            var perPlayer = new List<string>();
+            foreach (var player in players)
+            {
+                bool Own(ulong id) => player.Cards.Any(c => c.Id == id);
+                var events = new List<string>();
+                var dodges = attacks.Count(x => x.Dodged && Own(x.DefCardId));
+                var secondStrikes = attacks.Count(x => x.SecondStrike && Own(x.AtkCardId));
+                var heals = attacks.Count(x => x.Healed && Own(x.DefCardId));
+                if (dodges > 0) events.Add($"uniki {dodges}");
+                if (secondStrikes > 0) events.Add($"drugie ciosy {secondStrikes}");
+                if (heals > 0) events.Add($"leczenie {heals}");
+                if (events.Count > 0)
+                    perPlayer.Add($"{player.User?.Username ?? "????"} {string.Join(", ", events)}");
+            }
+
+            return perPlayer.Count == 0 ? "" : $"✨ Zdolności: {string.Join(" · ", perPlayer)}\n";
+        }
+
+        public static string GetFightLogFileName(DateTime date, List<PlayerInfo> players)
+            => $"{date:yyyy-MM-dd_HH-mm-ss}_{string.Join("_vs_", players.Select(p => FightLogNamePart(p.User?.Username)))}.txt";
+
+        internal static string FightLogNamePart(string name)
+        {
+            var part = new string((name ?? "").Where(c => c < 128 && (char.IsLetterOrDigit(c) || c == '-' || c == '_' || c == '.')).Take(32).ToArray());
+            return part.Length == 0 ? "gracz" : part;
+        }
+
+        public static string GetFullFightLog(FightHistory fight, List<PlayerInfo> players)
+        {
+            string PlayerName(PlayerInfo p) => p.User?.Username ?? "????";
+            var owners = players.SelectMany(p => p.Cards.Select(c => (Card: c, Player: PlayerName(p))))
+                .GroupBy(x => x.Card.Id).ToDictionary(g => g.Key, g => g.First());
+            string Label(ulong id) => owners.TryGetValue(id, out var o) ? $"{o.Card.Name} [{o.Player}]" : $"{id}";
+            string MaxHp(ulong id) => owners.TryGetValue(id, out var o) ? $"{o.Card.GetHealthWithPenalty()}" : "?";
+
+            var log = new StringBuilder();
+            log.AppendLine($"Pojedynek: {string.Join(" vs ", players.Select(PlayerName))}");
+            log.AppendLine();
+            log.AppendLine("Karty na start");
+            foreach (var player in players)
+            {
+                log.AppendLine($"{PlayerName(player)}:");
+                foreach (var card in player.Cards)
+                {
+                    log.AppendLine($"  {card.Name} (WID {card.Id}, {card.GetCardRealRarity()}) · {card.Dere} · życie {card.GetHealthWithPenalty()} · atak {card.GetAttackWithBonus()}"
+                        + $" · obrona {card.GetDefenceWithBonus()} · precyzja {card.GetCritChance():0.#}% · moc {card.CalculateCardPower():0}");
+                    var ability = card.Dere.GetAbilityDescription();
+                    if (ability != null)
+                        log.AppendLine($"     zdolność: {ability}");
+                    if (!card.HasImage())
+                        log.AppendLine("     bez obrazka: atak i obrona słabsze o 20% w walce");
+                }
+            }
+
+            for (int i = 0; i < fight.Rounds.Count; i++)
+            {
+                log.AppendLine();
+                log.AppendLine($"Runda {i + 1}");
+                foreach (var attack in fight.Rounds[i].Fights)
+                {
+                    var who = $"{(attack.SecondStrike ? "⚔ drugi cios: " : "")}{Label(attack.AtkCardId)} → {Label(attack.DefCardId)}";
+                    if (attack.Dodged)
+                    {
+                        log.AppendLine($"  {who}: unik");
+                        continue;
+                    }
+
+                    var notes = new List<string>();
+                    if (attack.Critical) notes.Add("krytyk");
+                    if (attack.Rage) notes.Add("szał Yandere");
+                    if (attack.Guarded) notes.Add("osłona Tsundere");
+                    var noteText = notes.Count > 0 ? $" ({string.Join(", ", notes)})" : "";
+                    log.AppendLine($"  {who}: {attack.Dmg:0.#} obrażeń{noteText} · zostało {attack.TargetHp:0.#}/{MaxHp(attack.DefCardId)}");
+                    if (attack.Healed)
+                        log.AppendLine($"  {Label(attack.DefCardId)} leczy się (Deredere)");
+                    if (attack.TargetHp <= 0)
+                        log.AppendLine($"  ✖ {Label(attack.DefCardId)} pada");
+                }
+            }
+
+            log.AppendLine();
+            log.AppendLine(fight.Winner == null ? "Wynik: remis" : $"Wynik: wygrywa {PlayerName(fight.Winner)}");
+            return log.ToString();
+        }
+
+        public static string CriticalHitsLine(FightHistory fight, List<PlayerInfo> players)
+        {
+            var critical = fight.Rounds.SelectMany(x => x.Fights).Where(x => x.Critical).Select(x => x.AtkCardId).ToList();
+            if (critical.Count == 0)
+                return "";
+
+            var perPlayer = players.Select(p => (Name: p.User?.Username ?? "????", Count: critical.Count(id => p.Cards.Any(c => c.Id == id))))
+                .Where(x => x.Count > 0).Select(x => $"{x.Name} {x.Count}");
+            return $"💥 Trafienia krytyczne: {string.Join(" · ", perPlayer)}\n";
         }
 
         public FightHistory MakeFightAsync(List<PlayerInfo> players, bool oneCard = false)
@@ -1359,7 +1532,10 @@ namespace Sanakan.Services.PocketWaifu
             foreach (var player in players)
             {
                 foreach (var card in player.Cards)
-                    totalCards.Add(new CardWithHealth() { Card = card, Health = card.GetHealthWithPenalty() });
+                {
+                    var health = card.GetHealthWithPenalty();
+                    totalCards.Add(new CardWithHealth() { Card = card, Health = health, MaxHealth = health });
+                }
             }
 
             var rounds = new List<RoundInfo>();
@@ -1378,30 +1554,15 @@ namespace Sanakan.Services.PocketWaifu
                     var enemies = totalCards.Where(x => x.Health > 0 && x.Card.GameDeckId != card.Card.GameDeckId).ToList();
                     if (enemies.Count() > 0)
                     {
-                        var target = Fun.GetOneRandomFrom(enemies);
-                        var dmg = GetDmgDeal(card.Card, target.Card);
-                        target.Health -= dmg;
+                        Strike(round, card, Fun.GetOneRandomFrom(enemies), false);
 
-                        if (target.Health < 1)
-                            target.Health = 0;
-
-                        var hpSnap = round.Cards.FirstOrDefault(x => x.CardId == target.Card.Id);
-                        if (hpSnap == null)
+                        // on its own turn, so the bonus does not grow with the number of enemies hitting it
+                        if (card.Card.Dere == Dere.Bodere && card.Health > 0 && Fun.TakeATry(DereAbility.BodereSecondStrikeChance))
                         {
-                            round.Cards.Add(new HpSnapshot
-                            {
-                                CardId = target.Card.Id,
-                                Hp = target.Health
-                            });
+                            enemies = enemies.Where(x => x.Health > 0).ToList();
+                            if (enemies.Count > 0)
+                                Strike(round, card, Fun.GetOneRandomFrom(enemies), true);
                         }
-                        else hpSnap.Hp = target.Health;
-
-                        round.Fights.Add(new AttackInfo
-                        {
-                            Dmg = dmg,
-                            AtkCardId = card.Card.Id,
-                            DefCardId = target.Card.Id
-                        });
                     }
                 }
 
@@ -1434,78 +1595,29 @@ namespace Sanakan.Services.PocketWaifu
         {
             var page = 0;
             var msg = new List<Embed>();
-            var cardsStrings = list.Select(x => $"**P:** {x.CardPower:F} {x.GetString(false, false, true)}");
+            var cardsStrings = list.Select(x => $"{x.GetString(false, false, true)} · moc {x.CardPower:0}");
             var perPage = cardsStrings.SplitList(10);
+            var deckPower = UserExtension.CombineCardPowers(list.Select(x => x.CalculateCardPower()));
 
             foreach (var p in perPage)
             {
                 msg.Add(new EmbedBuilder()
                 {
                     Color = EMType.Info.Color(),
-                    Footer = new EmbedFooterBuilder().WithText($"(S: {++page}) MOC {list.Sum(x => x.CalculateCardPower()):F}"),
-                    Description = ("**Twoje aktywne karty to**:\n\n" + string.Join("\n", p)).TrimToLength(),
+                    Title = "Aktywne karty",
+                    Footer = new EmbedFooterBuilder().WithText($"Strona {++page} z {perPage.Count} · moc talii {deckPower:0}"),
+                    Description = string.Join("\n", p).TrimToLength(),
                 }.Build());
             }
 
             return msg;
         }
 
-        public ICharacterInfoTitle IsInPool(CharacterPoolType type, ulong id)
-        {
-            var idPool = type switch
-            {
-                CharacterPoolType.Anime => _charIdAnime,
-                CharacterPoolType.Manga => _charIdManga,
-                _ => _charIdAll,
-            };
+        public Task<ICharacterInfoTitle> IsInPoolAsync(CharacterPoolType type, ulong id)
+            => _shinden.FindInPoolAsync(type, id);
 
-            if (idPool.Pool.IsNullOrEmpty())
-                return null;
-
-            return idPool.Pool.FirstOrDefault(x => x.Id == id);
-        }
-
-        public async Task<(ICharacterInfoTitle CharInfo, string Code)> GetRandomCharacterAsync(CharacterPoolType type)
-        {
-            var idPool = type switch
-            {
-                CharacterPoolType.Anime => _charIdAnime,
-                CharacterPoolType.Manga => _charIdManga,
-                _ => _charIdAll,
-            };
-
-            if (idPool.IsNeedForUpdate(_time.Now()))
-            {
-                using (await _semaphoreChars.LockAsync().ConfigureAwait(false))
-                {
-                    if (idPool.IsNeedForUpdate(_time.Now()))
-                    {
-                        try
-                        {
-                            var characters = type switch
-                            {
-                                CharacterPoolType.Anime => await _shClient.Ex.GetAllCharactersFromAnimeFatAsync(),
-                                CharacterPoolType.Manga => await _shClient.Ex.GetAllCharactersFromMangaFatAsync(),
-                                _ => await _shClient.Ex.GetAllCharactersFatAsync(),
-                            };
-
-                            if (!characters.IsSuccessStatusCode())
-                            {
-                                return (null, characters.Code.ToString());
-                            }
-
-                            idPool.Update(characters.Body, _time.Now());
-                        }
-                        catch (Exception ex)
-                        {
-                            return (null, $"laud lama: {ex.Message}");
-                        }
-                    }
-                }
-            }
-
-            return (idPool.GetOneRandom(), HttpStatusCode.OK.ToString());
-        }
+        public Task<(ICharacterInfoTitle CharInfo, string Code)> GetRandomCharacterAsync(CharacterPoolType type)
+            => _shinden.GetRandomCharacterAsync(type);
 
         private bool FileIsTooBigToSend(string file)
         {
@@ -1525,7 +1637,7 @@ namespace Sanakan.Services.PocketWaifu
                 }
                 catch (Exception ex)
                 {
-                    _logger.LogError($"Sending file: {ex.Message}");
+                    _logger.LogError($"Waifu: sending file: {ex.Message}");
                 }
             }
             return url;
@@ -1537,7 +1649,7 @@ namespace Sanakan.Services.PocketWaifu
             var cardList = cards.ToList();
             var userCache = mention ? null : await BuildUserCacheAsync(cardList, guild);
 
-            var contentString = new MessageContent(1).Append($"{title} **[{cardList.Count}]**\n\n");
+            var contentString = new MessageContent().Append($"{title} **[{cardList.Count}]**\n\n");
             foreach (var card in cardList.Select(async (x, i) => $"{i+1}: " + await GetCardInfo(x, mention, guild, shindenUrls, tldr, userCache)))
             {
                 AppendMessage(list, contentString, await card);
@@ -1595,42 +1707,49 @@ namespace Sanakan.Services.PocketWaifu
             return cache;
         }
 
-        private async Task<MessageEntry> GetCardInfo(Card card, bool mention, SocketGuild guild, bool shindenUrls, bool tldr,
+        private async Task<string> GetCardInfo(Card card, bool mention, SocketGuild guild, bool shindenUrls, bool tldr,
             IReadOnlyDictionary<ulong, IUser> userCache = null)
         {
-            var count = card.GetIconsCount(_tags) * 4;
             var mark = card.GameDeck.GetActiveMark(_time.Now());
             if (mention)
             {
                 var userId = card.GameDeckId == 1 ? (guild?.CurrentUser?.Id ?? 1) : card.GameDeckId;
-                if (tldr) return new MessageEntry($"{userId}{mark}: {card.Id} {card.GetCardRealRarity()} {card.GetStatusIcons(_tags)} {card.GetPocketUrl()}\n", count);
-                return new MessageEntry($"<@{userId}>{mark}: {card.GetIdWithUrl()} **{card.GetCardRealRarity()}** {card.GetStatusIcons(_tags)}\n", count);
+                if (tldr) return $"{userId}{mark}: {card.Id} {card.GetCardRealRarity()} {card.GetStatusIcons(_tags)} {card.GetPocketUrl()}\n";
+                return $"<@{userId}>{mark}: {card.GetIdWithUrl()} **{card.GetCardRealRarity()}** {card.GetStatusIcons(_tags)}\n";
             }
 
             IUser user = guild?.GetUser(card.GameDeckId);
             if (user == null && userCache != null)
                 userCache.TryGetValue(card.GameDeckId, out user);
             user ??= await _client.GetUserAsync(card.GameDeckId);
-            if (tldr) return new MessageEntry($"{user?.GetUserNickInGuild()}{mark}: {card.Id} {card.GetCardRealRarity()} {card.GetStatusIcons(_tags)} {card.GetPocketUrl()}\n", count);
+            if (tldr) return $"{user?.GetUserNickInGuild()}{mark}: {card.Id} {card.GetCardRealRarity()} {card.GetStatusIcons(_tags)} {card.GetPocketUrl()}\n";
 
             if (!shindenUrls || card?.GameDeck?.User?.Shinden == 0 || card?.GameDeckId == 1)
-                return new MessageEntry($"{user?.GetUserNickInGuild() ?? "????"}{mark}: {card.GetIdWithUrl()} **{card.GetCardRealRarity()}** {card.GetStatusIcons(_tags)}\n", count);
+                return $"{user?.GetUserNickInGuild() ?? "????"}{mark}: {card.GetIdWithUrl()} **{card.GetCardRealRarity()}** {card.GetStatusIcons(_tags)}\n";
 
-            return new MessageEntry($"[{user?.GetUserNickInGuild() ?? "????"}](https://shinden.pl/user/{card.GameDeck.User.Shinden}){mark}: {card.GetIdWithUrl()} **{card.GetCardRealRarity()}** {card.GetStatusIcons(_tags)}\n", count);
+            return $"[{user?.GetUserNickInGuild() ?? "????"}]({card.GameDeck.User.GetAlterProfileUrl()}){mark}:{card.GetIdWithUrl()} **{card.GetCardRealRarity()}** {card.GetStatusIcons(_tags)}\n";
         }
 
-        private void AppendMessage(List<Embed> embeds, MessageContent currentContent, MessageEntry nextPart) =>
+        private void AppendMessage(List<Embed> embeds, MessageContent currentContent, string nextPart) =>
             _helper.AppendMessage(embeds, currentContent, nextPart);
 
-        private void AppendMessage(List<Embed> embeds, MessageContent currentContent, string nextPart) =>
-            _helper.AppendMessage(embeds, currentContent, new MessageEntry(nextPart, 2));
+        // packs are numbered with the same names together, groups in the order their first pack came;
+        // every pack list and opening (Discord and API) must use it so the numbers match
+        public static List<BoosterPack> OrderPacksForNumbering(IEnumerable<BoosterPack> packs)
+            => packs.OrderBy(x => x.Id).GroupBy(x => x.Name).SelectMany(x => x).ToList();
 
-        public Embed GetBoosterPackList(SocketUser user, List<BoosterPack> packs)
+        public Embed GetBoosterPackList(SocketUser user, List<BoosterPack> packs) => new EmbedBuilder
+        {
+            Color = EMType.Info.Color(),
+            Description = $"{user.Mention} twoje pakiety:\n\n{Moderator.JoinWithinLimit(GetBoosterPackLines(packs), 3000, "\n")}"
+        }.Build();
+
+        public static List<string> GetBoosterPackLines(List<BoosterPack> packs)
         {
             int groupCnt = 0;
             int startGroup = 1;
             string groupName = "";
-            string packString = "";
+            var packLines = new List<string>();
             for (int i = 0; i < packs.Count + 1; i++)
             {
                 if (i == packs.Count || groupName != packs[i].Name)
@@ -1638,7 +1757,7 @@ namespace Sanakan.Services.PocketWaifu
                     if (groupName != "")
                     {
                         string count = groupCnt > 0 ? $"{startGroup}-{startGroup + groupCnt}" : $"{startGroup}";
-                        packString += $"**[{count}]** {groupName}\n";
+                        packLines.Add($"**[{count}]** {groupName}");
                     }
                     if (i != packs.Count)
                     {
@@ -1649,12 +1768,7 @@ namespace Sanakan.Services.PocketWaifu
                 }
                 else ++groupCnt;
             }
-
-            return new EmbedBuilder
-            {
-                Color = EMType.Info.Color(),
-                Description = $"{user.Mention} twoje pakiety:\n\n{packString.TrimToLength()}"
-            }.Build();
+            return packLines;
         }
 
         public string NormalizeItemFilter(string filter)
@@ -1674,6 +1788,7 @@ namespace Sanakan.Services.PocketWaifu
             var pages = new List<Embed>();
             var list = items.ToItemList(filter, hideFigureItems).SplitList(50);
             var hiddenCnt = hideFigureItems ? items.CountFigureCreationItems(filter) : 0;
+            var showsFigureItems = !hideFigureItems && items.Any(x => x.Type.IsFigureCreationItem() && x.Quality != Quality.Broken);
 
             for (int i = 0; i < list.Count; i++)
             {
@@ -1685,6 +1800,8 @@ namespace Sanakan.Services.PocketWaifu
 
                 if (hiddenCnt > 0)
                     embed.WithFooter(ItemExtension.GetHiddenFigureItemsInfo(hiddenCnt));
+                else if (showsFigureItems)
+                    embed.WithFooter($"Jakość: {FigureExtension.QualityOrder} (od najsłabszej)");
 
                 pages.Add(embed.Build());
             }
@@ -1692,9 +1809,16 @@ namespace Sanakan.Services.PocketWaifu
             return pages;
         }
 
-        public async Task<List<ulong>> GetCharactersFromSeasonAsync()
+        private const int SeasonCharacterAttempts = 3;
+
+        // a pack whose season file is gone falls back to the current season instead of never opening
+        private async Task<List<ulong>> GetCharactersFromSeasonAsync(string key = null)
         {
-            return await _shClient.Ex.GetAnimeFromSeasonAsync(true);
+            var season = _shinden.GetSeason(key);
+            if (season == null || season.Characters.Count == 0)
+                season = await _shinden.GetCurrentSeasonAsync();
+
+            return season?.Characters;
         }
 
         public async Task<List<Card>> OpenBoosterPackAsync(IUser user, BoosterPack pack, CharacterPoolType poolType)
@@ -1712,6 +1836,13 @@ namespace Sanakan.Services.PocketWaifu
                         id = Fun.GetOneRandomFrom(pack.Characters);
 
                     chara = await _shinden.GetCharacterInfoAsync(id.Character);
+                }
+                else if (!string.IsNullOrEmpty(pack.Season))
+                {
+                    // season lists only grow, so some characters may be gone from Shinden by now
+                    var charsInSeason = await GetCharactersFromSeasonAsync(pack.Season);
+                    for (int attempt = 0; chara == null && attempt < SeasonCharacterAttempts && !charsInSeason.IsNullOrEmpty(); attempt++)
+                        chara = await _shinden.GetCharacterInfoAsync(Fun.GetOneRandomFrom(charsInSeason));
                 }
                 else if (pack.Title != 0)
                 {
@@ -1795,25 +1926,35 @@ namespace Sanakan.Services.PocketWaifu
 
             using (await _cardGenLocker.LockAsync(card.Id))
             {
-                if (File.Exists(toReturn))
+                // a generation that failed half way leaves some files missing, so all of them are checked, not just the requested one
+                var cardMissing = !File.Exists(imageLocation) || !File.Exists(sImageLocation);
+                var profileMissing = !File.Exists(pImageLocation);
+                if (!cardMissing && !profileMissing)
                     return toReturn;
 
+                var pictures = new ImageProcessing.CardPictureCache();
                 try
                 {
-                    using (var image = await _img.GetWaifuCardAsync(card))
+                    if (cardMissing)
                     {
-                        image.SaveToPath(imageLocation);
-                        image.SaveToPath(sImageLocation, 133);
+                        using (var image = await _img.GetWaifuCardAsync(card, pictures))
+                        {
+                            image.SaveToPath(imageLocation);
+                            image.SaveToPath(sImageLocation, 133);
+                        }
                     }
 
-                    using (var cardImage = await _img.GetWaifuInProfileCardAsync(card))
+                    if (profileMissing)
                     {
-                        cardImage.SaveToPath(pImageLocation);
+                        using (var cardImage = await _img.GetWaifuInProfileCardAsync(card, pictures))
+                        {
+                            cardImage.SaveToPath(pImageLocation);
+                        }
                     }
                 }
                 catch (Exception ex)
                 {
-                    _logger.LogError($"Error while generating card {card.Id}: {ex.Message}");
+                    _logger.LogError($"Waifu: generating card {card.Id}: {ex.Message}");
                 }
             }
 
@@ -1845,7 +1986,7 @@ namespace Sanakan.Services.PocketWaifu
             }
             catch (Exception ex)
             {
-                _logger.LogError($"DeleteCardImageIfExist: card {card.Id}: {ex.Message}");
+                _logger.LogError($"Waifu: deleting card image {card.Id}: {ex.Message}");
             }
         }
 
@@ -1877,7 +2018,7 @@ namespace Sanakan.Services.PocketWaifu
             }
             catch (Exception ex)
             {
-                _logger.LogError($"GetRandomSarafiImage: {ex.Message}");
+                _logger.LogError($"Waifu: random safari image: {ex.Message}");
             }
 
             return dImg;
@@ -1922,7 +2063,7 @@ namespace Sanakan.Services.PocketWaifu
                 }
                 catch (Exception ex)
                 {
-                    _logger.LogError($"Sending file: {ex.Message}");
+                    _logger.LogError($"Waifu: sending file: {ex.Message}");
                 }
             }
             return url;
@@ -1948,6 +2089,20 @@ namespace Sanakan.Services.PocketWaifu
         public async Task<Embed> BuildCardViewAsync(Card card, ITextChannel trashChannel, SocketUser owner)
         {
             string imageUrl = await GetWaifuCardImageAsync(card, trashChannel);
+            string ownerString = (((owner as SocketGuildUser)?.Nickname ?? owner?.GlobalName) ?? owner?.Username) ?? "????";
+            bool hideScalpelInfo = card.CustomImageDate < _hiddeScalpelBeforeDate;
+
+            return card.GetView(hideScalpelInfo, _tags, _time)
+                .WithImageUrl(imageUrl)
+                .WithColor(EMType.Info.Color())
+                .WithFooter($"Należy do: {ownerString}")
+                .Build();
+        }
+
+        // the classic full look, kept as its own command on request
+        public async Task<Embed> BuildClassicCardViewAsync(Card card, ITextChannel trashChannel, SocketUser owner)
+        {
+            string imageUrl = await GetWaifuCardImageAsync(card, trashChannel);
             string imgUrls = $"[_obrazek_]({imageUrl})\n[_możesz zmienić obrazek tutaj_]({card.GetCharacterUrl()}/edit_crossroad)";
             string ownerString = (((owner as SocketGuildUser)?.Nickname ?? owner?.GlobalName) ?? owner?.Username) ?? "????";
             bool hideScalpelInfo = card.CustomImageDate < _hiddeScalpelBeforeDate;
@@ -1964,27 +2119,37 @@ namespace Sanakan.Services.PocketWaifu
             }.Build();
         }
 
+        public const string InactiveSection = "⚠️ **Nieaktywni:**";
+
+        // inactive players go to their own section instead of a mark on every row, so each row is one markdown element
         public async Task<List<string>> GetWhoWantsCardsStringAsync(List<GameDeck> wishlists, bool showNames, SocketGuild guild)
         {
-            if (!showNames)
+            var now = _time.Now();
+            var ordered = wishlists.Where(x => x.IsUserActive(now)).Concat(wishlists.Where(x => !x.IsUserActive(now))).ToList();
+
+            var lines = new List<string>();
+            var inactiveStarted = false;
+            for (int i = 0; i < ordered.Count; i++)
             {
-                return wishlists.Select((x, i) => $"{x.GetActiveMark(_time.Now())}{i+1}: <@{x.Id}>").ToList();
+                var deck = ordered[i];
+                if (!inactiveStarted && !deck.IsUserActive(now))
+                {
+                    lines.Add(InactiveSection);
+                    inactiveStarted = true;
+                }
+
+                var name = showNames ? await GetUserNameInfoAsync(deck, guild) : $"<@{deck.Id}>";
+                lines.Add($"{i + 1}: {name}");
             }
 
-            var str = new List<string>();
-            foreach (var user in wishlists.Select(async (x, i) => $"{x.GetActiveMark(_time.Now())}{i+1}: {await GetUserNameInfoAsync(x, guild)}"))
-            {
-                str.Add(await user);
-            }
-
-            return str;
+            return lines;
         }
 
         private async Task<string> GetUserNameInfoAsync(GameDeck deck, SocketGuild guild)
         {
-            return (deck.User.Shinden == 0 && deck.User.Id == 1)
+            return (deck.User.Shinden == 0 || deck.User.Id == 1)
             ? (guild.GetUser(deck.UserId) ?? _client.GetUser(deck.UserId) ?? await _client.GetUserAsync(deck.UserId)).GetUserNickInGuild()
-            : $"[{(guild.GetUser(deck.UserId) ?? _client.GetUser(deck.UserId) ?? await _client.GetUserAsync(deck.UserId)).GetUserNickInGuild()}](https://shinden.pl/user/{deck.User.Shinden})";
+            : $"[{(guild.GetUser(deck.UserId) ?? _client.GetUser(deck.UserId) ?? await _client.GetUserAsync(deck.UserId)).GetUserNickInGuild()}]({deck.User.GetAlterProfileUrl()})";
         }
 
         public Embed GetShopView(ItemWithCost[] items, string name = "Sklepik", string currency = "TC")
@@ -2012,7 +2177,8 @@ namespace Sanakan.Services.PocketWaifu
         public async Task<IEnumerable<Embed>> GetContentOfWishlistAsync(List<ulong> cardsId, List<ulong> charactersId, List<ulong> titlesId, bool tldr)
         {
             var contentTable = new List<string>();
-            if (cardsId.Count > 0)contentTable.Add($"**Karty:** {string.Join(", ", cardsId)}");
+            foreach (var chunk in cardsId.SplitList(200))
+                contentTable.Add($"**Karty:** {string.Join(", ", chunk)}");
 
             foreach (var character in charactersId)
             {
@@ -2046,29 +2212,11 @@ namespace Sanakan.Services.PocketWaifu
                 }
             }
 
-            string temp = "";
-            var content = new List<Embed>();
-            for (int i = 0; i < contentTable.Count; i++)
-            {
-                if (temp.Length + contentTable[i].Length > 3500)
-                {
-                    content.Add(new EmbedBuilder()
-                    {
-                        Color = EMType.Info.Color(),
-                        Description = temp
-                    }.Build());
-                    temp = contentTable[i];
-                }
-                else temp += $"\n{contentTable[i]}";
-            }
-
-            content.Add(new EmbedBuilder()
+            return DiscordLimits.Paginate(contentTable).Select(page => new EmbedBuilder()
             {
                 Color = EMType.Info.Color(),
-                Description = temp
-            }.Build());
-
-            return content;
+                Description = string.Join("\n", page)
+            }.Build()).ToList();
         }
 
         public async Task<IEnumerable<Card>> GetCardsFromWishlistAsync(List<ulong> cardsId, List<ulong> charactersId, List<ulong> titlesId, Database.DatabaseContext db, IEnumerable<Card> userCards)
@@ -2128,6 +2276,7 @@ namespace Sanakan.Services.PocketWaifu
             var allowItems = true;
             var totalExp = _expedition.GetExpFromExpedition(duration.CalcTime, card);
             var totalItemsCnt = _expedition.GetItemsCountFromExpedition(duration.CalcTime, card, user);
+            var cardLost = false;
 
             if (CheckEventInExpedition(card.Expedition, duration))
             {
@@ -2139,7 +2288,7 @@ namespace Sanakan.Services.PocketWaifu
                 {
                     if (card.Curse == CardCurse.DereBlockade)
                     {
-                        reward += $"zmiana zablokowana przez klątwę.\n";
+                        reward += $"nic – zmianę zablokowała klątwa.\n";
                     }
                     else
                     {
@@ -2154,6 +2303,7 @@ namespace Sanakan.Services.PocketWaifu
                 else if (e == EventType.LoseCard)
                 {
                     karmaMod = 0.5;
+                    cardLost = true;
                     user.StoreExpIfPossible(totalExp);
                     if (Fun.TakeATry(6d))
                     {
@@ -2207,7 +2357,9 @@ namespace Sanakan.Services.PocketWaifu
             var minAff = 0d;
             var karmaItem = 0d;
             var missingItems = 0;
-            reward += $"Zdobywa:\n+{totalExp:F} exp ({card.ExpCnt:F})\n";
+            reward += cardLost
+                ? "Zdobywa:\nDoświadczenie z wyprawy trafiło do skrzyni (jeśli było w niej miejsce).\n"
+                : $"Zdobywa:\n+{totalExp:F} exp ({card.ExpCnt:F})\n";
 
             if (allowItems && totalItemsCnt > 0)
             {
@@ -2327,7 +2479,7 @@ namespace Sanakan.Services.PocketWaifu
         {
             var cardsForDiscarding = ids.IsNullOrEmpty() ? user.GetCardsByTag(tagId).ToList() : user.GetCards(ids).ToList();
             if (cardsForDiscarding.IsNullOrEmpty())
-                return ExecutionResult.FromError("nie posiadasz takich kart");
+                return ExecutionResult.FromError(ids.IsNullOrEmpty() ? "nie masz kart oznaczonych jako kosz." : "nie posiadasz takich kart.");
 
             var realDiscardedCount = 0;
             var ignored = new List<Card>();
@@ -2351,10 +2503,10 @@ namespace Sanakan.Services.PocketWaifu
             string lettery = ignored.Count > 1 ? "" : "y";
 
             if (ignored.Count == cardsForDiscarding.Count)
-                return ExecutionResult.FromError($"nie udało się {actionStr}ć żadnej karty, najpewniej znajdują się one w klatce lub są oznaczone jako ulubione.");
+                return ExecutionResult.FromError($"nie udało się {actionStr}ć żadnej karty – {CardExtension.ProtectedFromDiscardingInfo}.");
 
             var response = new StringBuilder().Append($"{actionStr}ł ");
-            response.Append(realDiscardedCount > 1 ? $"{realDiscardedCount} kart" : $"kartę: {cardsForDiscarding.Where(x => !ignored.Any(c => c.Id == x.Id)).First().GetString(false, false, true)}");
+            response.Append(realDiscardedCount > 1 ? Polish.Count(realDiscardedCount, "kartę", "karty", "kart") : $"kartę: {cardsForDiscarding.Where(x => !ignored.Any(c => c.Id == x.Id)).First().GetString(false, false, true)}");
 
             if (ignored.Any())
                 response.Append($"\n\n ❗ Nie udało się {actionStr}ć {ignored.Count} kart{lettery}!");
@@ -2369,7 +2521,7 @@ namespace Sanakan.Services.PocketWaifu
                 return ExecutionResult.FromError("nie masz żadnych przedmiotów.");
 
             if (itemNumber <= 0 || itemNumber > itemList.Count)
-                return ExecutionResult.FromError("nie masz aż tylu przedmiotów.");
+                return ExecutionResult.FromError($"nie masz przedmiotu o numerze {itemNumber}.");
 
             var item = itemList[itemNumber - 1];
             if (item.Type.RequireImage() && detail == "1")
@@ -2408,6 +2560,10 @@ namespace Sanakan.Services.PocketWaifu
             return res;
         }
 
+        public static string PartPointsAdded(Figure figure, double added)
+            => $"Dodano {FigureExtension.ConstructionPointsText(added)} konstrukcji do części {figure.FocusedPart.ToName()} "
+                + $"({figure.PartExp:0.##} / {figure.ConstructionPointsToInstall(figure.SkeletonQuality)}).";
+
         private ExecutionResult UseItem(Item item, User user, int itemCnt, bool itemToExp)
         {
             if (!item.Type.CanUseWithoutCard(itemToExp))
@@ -2417,7 +2573,7 @@ namespace Sanakan.Services.PocketWaifu
             if (activeFigure == null && item.Type.IsFigureNeededToUse())
                 return ExecutionResult.FromError("nie posiadasz aktywnej figurki!");
 
-            var str = new StringBuilder().Append($"Użyto _{item.Name}_ {((itemCnt > 1) ? $"x{itemCnt}" : "")}\n\n");
+            var str = new StringBuilder().Append($"Użyto _{item.Name}_{((itemCnt > 1) ? $" x{itemCnt}" : "")}\n\n");
             switch (item.Type)
             {
                 case ItemType.GiveTagSlot:
@@ -2432,39 +2588,44 @@ namespace Sanakan.Services.PocketWaifu
                 case ItemType.FigureRightArmPart:
                 case ItemType.FigureRightLegPart:
                 case ItemType.FigureUniversalPart:
-                    if (itemToExp)
                     {
                         var itemPartType = item.Type.GetPartType();
-                        if (activeFigure.FocusedPart != itemPartType && itemPartType != FigurePart.All)
-                            return ExecutionResult.FromError("typy części się nie zgadzają.");
+                        var focused = activeFigure.FocusedPart;
+                        if (focused != itemPartType && itemPartType != FigurePart.All)
+                            return ExecutionResult.FromError($"to część typu {itemPartType.ToName()}, a wybrana jest {focused.ToName()}. Zmień wybór: `wybierz element {itemPartType.ToName().ToLower()}`.");
 
-                        var expFromPart = item.ToExpForPart(activeFigure.SkeletonQuality);
-                        var totalExp = expFromPart * itemCnt;
-                        activeFigure.PartExp += totalExp;
+                        if (itemToExp)
+                        {
+                            var totalExp = item.ToExpForPart(activeFigure.SkeletonQuality) * itemCnt;
+                            activeFigure.PartExp += totalExp;
+                            str.Append(PartPointsAdded(activeFigure, totalExp));
+                            break;
+                        }
 
-                        str.Append($"Dodano do wybranej części figurki {totalExp:F} punktów konstrukcji. W sumie posiada ich {activeFigure.PartExp:F}.");
+                        if (activeFigure.GetQualityOfFocusedPart() != Quality.Broken)
+                            return ExecutionResult.FromError($"wybrana część figurki ({focused.ToName()}) jest już założona, wybierz inną: `wybierz element`.");
+
+                        if (!activeFigure.CanAddPart(item))
+                            return ExecutionResult.FromError($"część {item.Quality.ToName()} jest słabsza od szkieletu, potrzebna jakość co najmniej {activeFigure.SkeletonQuality.ToName()}.");
+
+                        if (!activeFigure.HasEnoughPointsToAddPart(item))
+                            return ExecutionResult.FromError($"aktywowana część ma za mało punktów konstrukcji ({activeFigure.PartExp:0} / {activeFigure.ConstructionPointsToInstall(item)}).");
+
+                        if (!activeFigure.AddPart(item))
+                            return ExecutionResult.FromError("coś poszło nie tak.");
+
+                        var installed = activeFigure.InstalledPartsCount();
+                        str.Append($"Założono **{item.Name}** na figurce {activeFigure.Name} ({installed}/7 części).");
+                        str.Append(activeFigure.AllPartsInstalled() ? " Wszystkie części są założone!" : " Wybierz następną: `wybierz element`.");
                         break;
                     }
-
-                    if (!activeFigure.CanAddPart(item))
-                        return ExecutionResult.FromError("część, którą próbujesz dodać ma zbyt niską jakość.");
-
-                    if (!activeFigure.HasEnoughPointsToAddPart(item))
-                        return ExecutionResult.FromError($"aktywowana część ma zbyt małą ilość punktów konstrukcji, wymagana to {activeFigure.ConstructionPointsToInstall(item)}.");
-
-                    if (!activeFigure.AddPart(item))
-                        return ExecutionResult.FromError("coś poszło nie tak.");
-
-                    str.Append("Dodano część do figurki.");
-                    break;
 
                 case ItemType.FigureSkeleton:
                     if (itemToExp)
                     {
-                        var expFromPart = item.ToExpForPart(activeFigure.SkeletonQuality);
-                        activeFigure.PartExp += expFromPart * itemCnt;
-
-                        str.Append($"Dodano do wybranej części figurki {expFromPart:F} punktów konstrukcji. W sumie posiada ich {activeFigure.PartExp:F}.");
+                        var expFromPart = item.ToExpForPart(activeFigure.SkeletonQuality) * itemCnt;
+                        activeFigure.PartExp += expFromPart;
+                        str.Append(PartPointsAdded(activeFigure, expFromPart));
                         break;
                     }
                     return ExecutionResult.FromError("nie możesz użyć szkieletu bez karty, chyba że chcesz przerobić go na exp.");
@@ -2506,9 +2667,23 @@ namespace Sanakan.Services.PocketWaifu
                 case ItemType.IncreaseUltimateDefence:
                 case ItemType.IncreaseUltimateHealth:
                 case ItemType.IncreaseUltimateAll:
-                    var res = card.CanUpgradePower(itemCnt);
+                    var res = card.CanUpgradePower((long)itemCnt * item.Type.UltimatePowerPoints());
                     if (res.Status == ExecutionResult.EStatus.Error)
                         return res;
+
+                    var useful = card.UsefulUltimatePills(item.Type);
+                    if (useful == 0)
+                        return ExecutionResult.FromError(item.Type.UltimateStatAtLimit());
+                    if (useful < itemCnt)
+                        return ExecutionResult.FromError($"tej karcie wystarczy już {Polish.Count(useful, "pigułka", "pigułki", "pigułek")}, kolejne by się zmarnowały.");
+                    break;
+
+                case ItemType.IncreasePrecision:
+                    var usefulGlasses = card.UsefulPrecisionItems();
+                    if (usefulGlasses == 0)
+                        return ExecutionResult.FromError($"precyzja tej karty jest już maksymalna ({card.GetMaxCritChance():0.#}%).");
+                    if (usefulGlasses < itemCnt)
+                        return ExecutionResult.FromError($"tej karcie wystarczy już {Polish.Count(usefulGlasses, "para okularów", "pary okularów", "par okularów")}, kolejne by się zmarnowały.");
                     break;
 
                 default:
@@ -2522,7 +2697,7 @@ namespace Sanakan.Services.PocketWaifu
             double karmaChange = item.Type.GetBaseKarmaChange() * itemCnt;
             double affectionInc = item.Type.GetBaseAffection() * itemCnt;
             var expMod = card.Curse == CardCurse.LoweredExperience ? 0.2 : (card.FromFigure ? 0.3 : 1);
-            var str = new StringBuilder().Append($"Użyto _{item.Name}_ {((itemCnt > 1) ? $"x{itemCnt}" : "")}{(" na " + card.GetString(false, false, true))}\n\n");
+            var str = new StringBuilder().Append($"Użyto _{item.Name}_{((itemCnt > 1) ? $" x{itemCnt}" : "")} na {card.GetString(false, false, true)}\n\n");
 
             switch (item.Type)
             {
@@ -2577,13 +2752,17 @@ namespace Sanakan.Services.PocketWaifu
                     card.DefenceBonus += itemCnt * 4;
                     break;
 
+                case ItemType.IncreasePrecision:
+                    card.AddCritChance(itemCnt);
+                    break;
+
                 case ItemType.ChangeStarType:
                     if (StarStyle.Full.TryParse(detail, out var newStyle))
                     {
                         card.StarStyle = newStyle;
                         break;
                     }
-                    return ExecutionResult.FromError("Nie rozpoznano typu gwiazdki!");
+                    return ExecutionResult.FromError("Nie rozpoznano typu gwiazdki! Dostępne: `pelna`, `pusta`.");
 
                 case ItemType.ChangeBorderVariant:
                     if (int.TryParse(detail, out var variant))
@@ -2602,12 +2781,14 @@ namespace Sanakan.Services.PocketWaifu
                 case ItemType.ChangeCardImage:
                     var charIf = await _shinden.GetCharacterInfoAsync(card.Character);
                     if (charIf == null)
-                        return ExecutionResult.FromError("Nie odnaleziono postaci na shinden!");
+                        return ExecutionResult.FromError("Nie odnaleziono postaci na Shindenie!");
 
                     int tidx = 0;
                     var urls = charIf.Pictures.GetPicList();
+                    // only a preview: an error result keeps the item unused and does not count toward the daily mission
                     if (string.Equals(detail, "lista", StringComparison.CurrentCultureIgnoreCase))
-                        return ExecutionResult.FromSuccess("Obrazki: \n" + string.Join("\n", urls.Select(x => $"{++tidx}: {x}")), EMType.Info);
+                        return ExecutionResult.FromError(urls.Count == 0 ? "Ta postać nie ma obrazków na Shindenie."
+                            : "Obrazki:\n" + Moderator.JoinWithinLimit(urls.Select(x => $"{++tidx}: {x}").ToList(), 3000, "\n"), EMType.Info);
 
                     if (!int.TryParse(detail, out var urlIdx) || urlIdx <= 0 || urlIdx > urls.Count)
                         return ExecutionResult.FromError("Nie odnaleziono obrazka!");
@@ -2643,7 +2824,7 @@ namespace Sanakan.Services.PocketWaifu
                     }
                     catch (Exception)
                     {
-                        return ExecutionResult.FromError("Obrazek jest zbyt duży!");
+                        return ExecutionResult.FromError("Nie udało się zapisać obrazka! Upewnij się, że nie jest zbyt duży i ma poprawny format.");
                     }
                     card.IsAnimatedImage = isAnim;
                     card.CustomImageDate = _time.Now();
@@ -2659,7 +2840,14 @@ namespace Sanakan.Services.PocketWaifu
                     if (card.Image is null)
                         return ExecutionResult.FromError("Aby ustawić ramkę, karta musi posiadać wcześniej ustawiony obrazek na stronie!");
 
-                    _ = await _img.SaveCardBorderImageFromUrlAsync(imgCheck2.Url, card);
+                    try
+                    {
+                        _ = await _img.SaveCardBorderImageFromUrlAsync(imgCheck2.Url, card);
+                    }
+                    catch (Exception)
+                    {
+                        return ExecutionResult.FromError("Nie udało się zapisać obrazka ramki! Upewnij się, że nie jest zbyt duży i ma poprawny format.");
+                    }
                     break;
 
                 case ItemType.BloodOfYourWaifu:
@@ -2822,12 +3010,15 @@ namespace Sanakan.Services.PocketWaifu
                     if (itemCnt == 1 && Enum.TryParse<Dere>(detail, out var targetDere))
                     {
                         if (targetDere == Dere.Yato || targetDere == Dere.Yami || targetDere == Dere.Raito)
-                            return ExecutionResult.FromError("nie można zmienić charakteru na ten który został wybrany!");
+                            return ExecutionResult.FromError("nie można wylosować charakteru Yami, Raito ani Yato!");
 
                         itemCnt = (int)RerollDereUntil(card, targetDere, item.Count, RandomizeDere);
                         karmaChange *= itemCnt;
                         affectionInc *= itemCnt;
-                        str.Append($"Użyto {itemCnt} przedmiotów by osiągnąć cel!\n");
+                        var used = Polish.Count(itemCnt, "przedmiot", "przedmioty", "przedmiotów");
+                        str.Append(card.Dere == targetDere
+                            ? $"Użyto {used}, by osiągnąć cel!\n"
+                            : $"Użyto {used}, ale nie udało się wylosować charakteru {targetDere}.\n");
                     }
                     else
                     {
@@ -2844,7 +3035,7 @@ namespace Sanakan.Services.PocketWaifu
                     {
                         user.GameDeck.Figures.Add(figure);
                         user.GameDeck.Cards.Remove(card);
-                        str.Append($"Rozpoczęto tworzenie figurki.");
+                        str.Append($"Rozpoczęto tworzenie figurki {card.Name} (szkielet {item.Quality.ToName()}). Nowa figurka nie jest aktywna, wybierz ją przez `figurki`.");
                         break;
                     }
                     return ExecutionResult.FromError("coś poszło nie tak.");
@@ -2917,7 +3108,13 @@ namespace Sanakan.Services.PocketWaifu
             var c = user.GameDeck.GetCardsWishList();
 
             if (showContentOnly)
-                return await _helper.SendEmbedsOnDMAsync(discordUser, await GetContentOfWishlistAsync(c, p, t, tldr), tldr);
+            {
+                var pages = (await GetContentOfWishlistAsync(c, p, t, tldr)).ToList();
+                if (pages.Count == 0)
+                    return ExecutionResult.FromError("na liście życzeń nie ma nic do pokazania.");
+
+                return await _helper.SendEmbedsOnDMAsync(discordUser, pages, tldr);
+            }
 
             var cards = await GetCardsFromWishlistAsync(c, p, t, db, user.GameDeck.Cards);
 

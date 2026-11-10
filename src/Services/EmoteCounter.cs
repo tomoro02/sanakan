@@ -7,7 +7,6 @@ using Discord;
 using Discord.WebSocket;
 using Sanakan.Config;
 using Sanakan.Services.Time;
-using Shinden.Logger;
 
 namespace Sanakan.Services
 {
@@ -98,7 +97,7 @@ namespace Sanakan.Services
             }
             catch (Exception ex)
             {
-                _logger.LogError($"EmoteCounter: zapis dumpEmotes.json: {ex.Message}");
+                _logger.LogError($"EmoteCounter: saving dumpEmotes.json: {ex.Message}");
             }
         }
 
@@ -119,7 +118,7 @@ namespace Sanakan.Services
             }
             catch (Exception ex)
             {
-                _logger.LogError($"EmoteCounter: odczyt dumpEmotes.json: {ex.Message}");
+                _logger.LogError($"EmoteCounter: loading dumpEmotes.json: {ex.Message}");
             }
         }
 

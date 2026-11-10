@@ -1,7 +1,6 @@
 ﻿#pragma warning disable 1591
 
 using Sanakan.Config;
-using Shinden.Logger;
 using System;
 using System.Collections.Generic;
 using System.Linq;
@@ -27,7 +26,13 @@ namespace Sanakan.Services
 
         public void Log(string message)
         {
-            Console.WriteLine(MaskSecrets(message));
+            Console.WriteLine(Format(MaskSecrets(message), DateTime.Now));
+        }
+
+        public static string Format(string message, DateTime now)
+        {
+            var (kind, text) = LoggerExtensions.Parse(message);
+            return $"[{now:yyyy-MM-dd HH:mm:ss}] {LoggerExtensions.Label(kind)}{text}";
         }
 
         public string MaskSecrets(string message)
@@ -48,7 +53,7 @@ namespace Sanakan.Services
             if (config == null)
                 return Enumerable.Empty<string>();
 
-            var secrets = new List<string> { config.BotToken, config.Shinden?.Token, config.Jwt?.Key };
+            var secrets = new List<string> { config.BotToken, config.Shinden?.Token, config.Shinden?.ApiToken, config.Jwt?.Key };
             secrets.AddRange(config.ApiKeys?.Select(x => x.Key) ?? Enumerable.Empty<string>());
             secrets.AddRange(config.UserKeyApps?.Select(x => x.Key) ?? Enumerable.Empty<string>());
 

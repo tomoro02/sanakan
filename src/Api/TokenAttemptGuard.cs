@@ -2,6 +2,8 @@
 
 using System;
 using System.Collections.Concurrent;
+using System.Collections.Generic;
+using System.Linq;
 using Sanakan.Services.Time;
 
 namespace Sanakan.Api
@@ -11,6 +13,8 @@ namespace Sanakan.Api
         bool IsLocked(string key, out TimeSpan retryAfter);
         void RegisterFailure(string key);
         void RegisterSuccess(string key);
+        List<(string Key, TimeSpan Left)> GetLocked();
+        int Unlock(string key = null);
     }
 
     /// <summary>
@@ -26,6 +30,7 @@ namespace Sanakan.Api
         private sealed class AttemptState
         {
             public int Failures;
+            public DateTime LastFailure;
             public DateTime? LockedUntil;
         }
 
@@ -33,6 +38,9 @@ namespace Sanakan.Api
         private readonly ISystemTime _time;
 
         public TokenAttemptGuard(ISystemTime time) => _time = time;
+
+        public static string ClientKey(Microsoft.AspNetCore.Http.HttpContext context)
+            => context?.Connection?.RemoteIpAddress?.ToString() ?? "unknown";
 
         public bool IsLocked(string key, out TimeSpan retryAfter)
         {
@@ -66,9 +74,15 @@ namespace Sanakan.Api
             var state = _states.GetOrAdd(key, _ => new AttemptState());
             lock (state)
             {
+                // only failures within the last LockDuration count, so occasional mistakes never add up to a lock
+                var now = _time.Now();
+                if (now - state.LastFailure > LockDuration)
+                    state.Failures = 0;
+
+                state.LastFailure = now;
                 state.Failures++;
                 if (state.Failures >= MaxAttempts)
-                    state.LockedUntil = _time.Now().Add(LockDuration);
+                    state.LockedUntil = now.Add(LockDuration);
             }
         }
 
@@ -78,6 +92,28 @@ namespace Sanakan.Api
                 return;
 
             _states.TryRemove(key, out _);
+        }
+
+        public List<(string Key, TimeSpan Left)> GetLocked()
+        {
+            var locked = new List<(string Key, TimeSpan Left)>();
+            foreach (var key in _states.Keys)
+            {
+                if (IsLocked(key, out var left))
+                    locked.Add((key, left));
+            }
+            return locked.OrderByDescending(x => x.Left).ToList();
+        }
+
+        // null clears every client, including ones with failures that are not locked yet
+        public int Unlock(string key = null)
+        {
+            if (key != null)
+                return _states.TryRemove(key, out _) ? 1 : 0;
+
+            var count = _states.Count;
+            _states.Clear();
+            return count;
         }
     }
 }

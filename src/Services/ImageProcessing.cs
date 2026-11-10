@@ -7,12 +7,13 @@ using System.IO;
 using System.Linq;
 using System.Net;
 using System.Net.Http;
+using System.Threading;
 using System.Threading.Tasks;
 using Sanakan.Database.Models;
 using Sanakan.Extensions;
 using Sanakan.Services.PocketWaifu;
-using Shinden;
-using Shinden.Models;
+using Sanakan.ShindenCompat;
+using Sanakan.ShindenCompat.Models;
 using SixLabors.Fonts;
 using SixLabors.ImageSharp;
 using SixLabors.ImageSharp.Drawing.Processing;
@@ -23,11 +24,17 @@ using SixLabors.ImageSharp.Formats.Webp;
 
 namespace Sanakan.Services
 {
-    public class ImageProcessing
+    public partial class ImageProcessing
     {
         private const long MaxImageBytes = 40 * 1024 * 1024;
         private const int MaxImageDimension = 8192;
         private const long MaxImagePixels = 64_000_000;
+        // the default pool scales with the machine's total memory; this caps what stays reserved between images
+        public const int MemoryPoolMegabytes = 1024;
+
+        public static void LimitMemoryPool()
+            => Configuration.Default.MemoryAllocator = SixLabors.ImageSharp.Memory.MemoryAllocator.Create(
+                new SixLabors.ImageSharp.Memory.MemoryAllocatorOptions { MaximumPoolSizeMegabytes = MemoryPoolMegabytes });
 
         private FontFamily _digital = new FontCollection().Add("Fonts/Digital.ttf");
         private FontFamily _latoBold = new FontCollection().Add("Fonts/Lato-Bold.ttf");
@@ -42,9 +49,14 @@ namespace Sanakan.Services
         private readonly List<DomainData> _imageServices;
         private readonly string[] _extensions = new[] { "png", "jpg", "jpeg", "gif", "webp" };
         private readonly bool _allowPrivateHosts;
+        private readonly ILogger _logger;
 
-        public ImageProcessing(ShindenClient shinden, TagIcon gallery, bool allowPrivateHosts = false)
+        private const int CharacterPictureAttempts = 3;
+        private const int CharacterPictureRetryDelayMs = 400;
+
+        public ImageProcessing(ShindenClient shinden, TagIcon gallery, bool allowPrivateHosts = false, ILogger logger = null)
         {
+            _logger = logger;
             _shclient = shinden;
             _galleryTag = gallery;
             _allowPrivateHosts = allowPrivateHosts;
@@ -247,11 +259,32 @@ namespace Sanakan.Services
         private static bool IsTooLarge(HttpResponseMessage res)
             => res.Content.Headers.ContentLength > MaxImageBytes;
 
-        private async Task<Stream> GetImageFromUrlAsync(string url, bool fixExt = false)
+        internal sealed class DownloadFailure
         {
+            public string Reason { get; private set; }
+            public HttpStatusCode? StatusCode { get; private set; }
+
+            public void Set(string reason, HttpStatusCode? statusCode = null)
+            {
+                Reason = reason;
+                StatusCode = statusCode;
+            }
+
+            public void Set(Exception ex) => Set(ex is OperationCanceledException ? "timeout" : $"{ex.GetType().Name}: {ex.Message}");
+        }
+
+        private static Stream Fail(DownloadFailure failure, Stream result, string reason, HttpStatusCode? statusCode = null)
+        {
+            failure?.Set(reason, statusCode);
+            return result;
+        }
+
+        private async Task<Stream> GetImageFromUrlAsync(string url, bool fixExt = false, DownloadFailure failure = null)
+        {
+            failure ??= new DownloadFailure();
             try
             {
-                var stream = await DownloadImageAsync(url);
+                var stream = await DownloadImageAsync(url, failure);
                 if (stream != null)
                     return stream;
 
@@ -260,66 +293,77 @@ namespace Sanakan.Services
                     var splited = url.Split(".");
                     foreach (var ext in _extensions)
                     {
+                        // more requests to a host that is rate limiting us only prolong the limit
+                        if (failure.StatusCode == HttpStatusCode.TooManyRequests)
+                            return null;
+
                         splited[splited.Length - 1] = ext;
-                        stream = await DownloadImageAsync(string.Join(".", splited));
+                        stream = await DownloadImageAsync(string.Join(".", splited), failure);
 
                         if (stream != null)
                             return stream;
                     }
                 }
             }
-            catch (Exception)
+            catch (Exception ex)
             {
+                failure?.Set(ex);
                 return Stream.Null;
             }
 
             return null;
         }
 
-        private async Task<Stream> DownloadImageAsync(string url)
+        private async Task<Stream> DownloadImageAsync(string url, DownloadFailure failure = null)
         {
             if (!_allowPrivateHosts && !IsPublicHttpUrl(url))
-                return null;
+                return Fail(failure, null, "not a public address");
 
-            using var res = await _httpClient.GetAsync(url, HttpCompletionOption.ResponseHeadersRead);
+            using var timeout = new CancellationTokenSource(_httpClient.Timeout);
+            using var res = await _httpClient.GetAsync(url, HttpCompletionOption.ResponseHeadersRead, timeout.Token);
             if (!res.IsSuccessStatusCode)
-                return null;
+                return Fail(failure, null, $"HTTP {(int)res.StatusCode}", res.StatusCode);
 
             if (IsTooLarge(res))
-                return Stream.Null;
+                return Fail(failure, Stream.Null, "file too large");
 
             var buffer = new MemoryStream();
-            using (var source = await res.Content.ReadAsStreamAsync())
+            try
             {
+                using var source = await res.Content.ReadAsStreamAsync(timeout.Token);
                 var chunk = new byte[81920];
                 int read;
-                while ((read = await source.ReadAsync(chunk)) > 0)
+                while ((read = await source.ReadAsync(chunk, timeout.Token)) > 0)
                 {
                     if (buffer.Length + read > MaxImageBytes)
                     {
                         buffer.Dispose();
-                        return Stream.Null;
+                        return Fail(failure, Stream.Null, "file too large");
                     }
                     buffer.Write(chunk, 0, read);
                 }
-            }
+                buffer.Position = 0;
+                if (!await HasAllowedImageSignatureAsync(buffer))
+                {
+                    buffer.Dispose();
+                    return Fail(failure, Stream.Null, "not a supported image");
+                }
 
-            buffer.Position = 0;
-            if (!await HasAllowedImageSignatureAsync(buffer))
+                buffer.Position = 0;
+                if (!await HasAcceptableDimensionsAsync(buffer))
+                {
+                    buffer.Dispose();
+                    return Fail(failure, Stream.Null, "image dimensions too large");
+                }
+
+                buffer.Position = 0;
+                return buffer;
+            }
+            catch
             {
                 buffer.Dispose();
-                return Stream.Null;
+                throw;
             }
-
-            buffer.Position = 0;
-            if (!await HasAcceptableDimensionsAsync(buffer))
-            {
-                buffer.Dispose();
-                return Stream.Null;
-            }
-
-            buffer.Position = 0;
-            return buffer;
         }
 
         private static async Task<bool> HasAcceptableDimensionsAsync(Stream stream)
@@ -337,7 +381,18 @@ namespace Sanakan.Services
             }
         }
 
-        private async Task<Image> GetImageFromUrlOrLocalAsync(string uri)
+        // One card generation renders the card more than once (full and profile version),
+        // the remote picture is downloaded for the first render only. A failed download (null) is kept as well.
+        public sealed class CardPictureCache
+        {
+            private readonly Dictionary<string, byte[]> _pictures = new Dictionary<string, byte[]>();
+
+            internal bool TryGet(string url, out byte[] picture) => _pictures.TryGetValue(url, out picture);
+
+            internal void Add(string url, Stream picture) => _pictures[url] = (picture as MemoryStream)?.ToArray();
+        }
+
+        private async Task<Image> GetImageFromUrlOrLocalAsync(string uri, CardPictureCache pictures = null)
         {
             if (Dir.IsLocal(uri))
             {
@@ -353,15 +408,25 @@ namespace Sanakan.Services
                 return new Image<Rgba32>(1, 1);
             }
 
+            if (pictures != null && pictures.TryGet(uri, out var cached))
+                return cached is null ? new Image<Rgba32>(1, 1) : Image.Load(cached);
+
             try
             {
                 using var imageStream = await GetImageFromUrlAsync(uri, true);
-                return (imageStream is null || imageStream == Stream.Null)
-                    ? new Image<Rgba32>(1, 1)
-                    : await Image.LoadAsync(imageStream);
+                if (imageStream is null || imageStream == Stream.Null)
+                {
+                    pictures?.Add(uri, null);
+                    return new Image<Rgba32>(1, 1);
+                }
+
+                var image = await Image.LoadAsync(imageStream);
+                pictures?.Add(uri, imageStream);
+                return image;
             }
             catch (Exception)
             {
+                pictures?.Add(uri, null);
                 return new Image<Rgba32>(1, 1);
             }
         }
@@ -424,8 +489,15 @@ namespace Sanakan.Services
             var width = Math.Max(sizeTop.Width, sizeBot.Width);
             var height = sizeTop.Height + sizeBot.Height;
 
-            if (height > 0 || width > 0)
-                CheckImageSize(image, new Size(width, height), true);
+            // both crops below need the image to be exactly width x height
+            if (image.Width != width || image.Height != height)
+            {
+                image.Mutate(x => x.Resize(new ResizeOptions
+                {
+                    Mode = ResizeMode.Crop,
+                    Size = new Size(width, height)
+                }));
+            }
 
             using var topImage = image.Clone(x => x.Crop(sizeTop.Width, sizeTop.Height));
             using var botImage = image.Clone(x => x.Crop(new Rectangle(0, sizeTop.Height, sizeBot.Width, sizeBot.Height)));
@@ -462,7 +534,7 @@ namespace Sanakan.Services
             using (var stream = await GetImageFromUrlAsync(url, true))
             {
                 if (stream is null || stream == Stream.Null)
-                    return;
+                    throw new InvalidDataException("Image could not be downloaded");
 
                 var detectedFormat = await Image.DetectFormatAsync(stream);
                 using var image = detectedFormat == WebpFormat.Instance ?
@@ -601,36 +673,7 @@ namespace Sanakan.Services
         }
 
         private IEnumerable<Card> GetOrdertedCardsForGallery(User user, int count)
-        {
-            if (user.Id == 1)
-                return user.GameDeck.Cards.OrderBy(x => x.Rarity).Take(count);
-
-            if (string.IsNullOrEmpty(user.GameDeck.GalleryOrderedIds))
-            {
-                return user.GameDeck.GetOrderedGalleryCards(_galleryTag.Id).Take(count);
-            }
-
-            var ids = user.GameDeck.GalleryOrderedIds.Split(" ")
-                .Select(x => Api.Models.UserSiteProfile.TryParseIds(x)).Distinct();
-
-            var cards = new List<Card>();
-            var cardsInGallery = user.GameDeck.GetOrderedGalleryCards(_galleryTag.Id).ToList();
-            foreach (var id in ids)
-            {
-                if (id == 0)
-                    continue;
-
-                var card = cardsInGallery.FirstOrDefault(x => x.Id == id);
-                if (card != null)
-                {
-                    cards.Add(card);
-                    cardsInGallery.Remove(card);
-                }
-            }
-
-            cards.AddRange(cardsInGallery);
-            return cards.Take(count);
-        }
+            => user.GetProfileGalleryCards(_galleryTag.Id, count);
 
         private async Task<Image> GetUserNewProfileStyleAsync(IUserInfo shindenUser, User botUser)
         {
@@ -956,7 +999,7 @@ namespace Sanakan.Services
             {
                 var hasRoundAvatar = botUser.StatsStyleSettings.HasFlag(ProfileSettings.RoundAvatar) || hasAvBorder;
                 using var webpAvatarStream = avatar.ToWebpStream();
-                using var userAvatar = Image.Load(webpAvatarStream);
+                using var userAvatar = Image.Load<Rgba32>(webpAvatarStream);
 
                 using var avBack = new Image<Rgba32>(tSize, tSize, GetOrCreateColor("#3f3f3f"));
                 if (hasRoundAvatar) avBack.Mutate(x => x.Round(hasAvBorder ? 40 : 44));
@@ -1067,46 +1110,6 @@ namespace Sanakan.Services
             return selected > 0 ? $"{dir}{selected}.png": string.Empty;
         }
 
-        private async Task<Image<Rgba32>> GetSiteStatisticUserBadge(string avatarUrl, string name, string color)
-        {
-            var font = GetFontSize(_latoBold, 32, name, 360);
-
-            var badge = new Image<Rgba32>(450, 65);
-            badge.Mutate(x => x.DrawText(name, font, GetOrCreateColor("#A4A4A4"), new Point(72, 3 + (int)((58 - font.Size) / 2))));
-
-            using (var border = new Image<Rgba32>(3, 57))
-            {
-                border.Mutate(x => x.BackgroundColor(GetOrCreateColor(color)));
-                badge.Mutate(x => x.DrawImage(border, new Point(63, 5), 1));
-            }
-
-            using (var stream = await GetImageFromUrlAsync(avatarUrl))
-            {
-                if (stream is null || stream == Stream.Null)
-                    return badge;
-
-                using (var avatar = Image.Load(stream))
-                {
-                    avatar.Mutate(x => x.Resize(new ResizeOptions
-                    {
-                        Mode = ResizeMode.Crop,
-                        Size = new Size(57, 57)
-                    }));
-
-                    if (avatar.Frames.Count > 1)
-                    {
-                        Animate(badge, avatar, new Point(6, 5));
-                    }
-                    else
-                    {
-                        badge.Mutate(x => x.DrawImage(avatar, new Point(6, 5), 1));
-                    }
-                }
-            }
-
-            return badge;
-        }
-
         private Image GetRWStats(ISeriesStatus status, string path, MoreSeriesStatus more)
         {
             int startPointX = 7;
@@ -1157,9 +1160,9 @@ namespace Sanakan.Services
             var listTime = new List<string>();
             if (more.Time != null)
             {
-                if (more.Time.Years != 0) listTime.Add($"{more?.Time?.Years} lat");
+                if (more.Time.Years > 0) listTime.Add(Polish.Count((long)more.Time.Years.Value, "rok", "lata", "lat"));
                 if (more.Time.Months != 0) listTime.Add($"{more?.Time?.Months} mies.");
-                if (more.Time.Days != 0) listTime.Add($"{more?.Time?.Days} dni");
+                if (more.Time.Days > 0) listTime.Add(Polish.Count((long)more.Time.Days.Value, "dzień", "dni", "dni"));
                 if (more.Time.Hours != 0) listTime.Add($"{more?.Time?.Hours} h");
                 if (more.Time.Minutes != 0) listTime.Add($"{more?.Time?.Minutes} m");
             }
@@ -1225,184 +1228,6 @@ namespace Sanakan.Services
             }
 
             return bar;
-        }
-
-        private Image GetLastRWListCover(Stream imageStream)
-        {
-            if (imageStream == null) return null;
-
-            var cover = Image.Load(imageStream);
-            cover.Mutate(x => x.Resize(new ResizeOptions
-            {
-                Mode = ResizeMode.Max,
-                Size = new Size(20, 50)
-            }));
-
-            return cover;
-        }
-
-        private async Task<Image<Rgba32>> GetLastRWList(List<ILastReaded> lastRead, List<ILastWatched> lastWatch)
-        {
-            var titleFont = GetOrCreateFont(_latoBold, 10);
-            var nameFont = GetOrCreateFont(_latoBold, 16);
-            var fColor = GetOrCreateColor("#9A9A9A");
-            int startY = 24;
-
-            var image = new Image<Rgba32>(175, 250);
-            image.Mutate(x => x.DrawText($"Ostatnio obejrzane:", nameFont, fColor, new Point(0, 4)));
-            if (lastWatch != null)
-            {
-                int max = -1;
-                foreach (var last in lastWatch)
-                {
-                    if (++max >= 3) break;
-                    using (var stream = await GetImageFromUrlAsync(last.AnimeCoverUrl, true))
-                    {
-                        using (var cover = GetLastRWListCover(stream))
-                        {
-                            if (cover != null)
-                                image.Mutate(x => x.DrawImage(cover, new Point(0, startY + (35 * max)), 1));
-                        }
-                    }
-
-                    image.Mutate(x => x.DrawText($"{last.AnimeTitle.TrimToLength(29)}", titleFont, fColor, new Point(25, startY + (35 * max))));
-                    image.Mutate(x => x.DrawText($"{last.EpisodeNo} / {last.EpisodesCnt}", titleFont, fColor, new Point(25, startY + 11 + (35 * max))));
-                }
-            }
-
-            startY += 128;
-            image.Mutate(x => x.DrawText($"Ostatnio przeczytane:", nameFont, fColor, new Point(0, 131)));
-            if (lastRead != null)
-            {
-                int max = -1;
-                foreach (var last in lastRead)
-                {
-                    if (++max >= 3) break;
-                    using (var stream = await GetImageFromUrlAsync(last.MangaCoverUrl, true))
-                    {
-                        using (var cover = GetLastRWListCover(stream))
-                        {
-                            if (cover != null)
-                                image.Mutate(x => x.DrawImage(cover, new Point(0, startY + (35 * max)), 1));
-                        }
-                    }
-
-                    image.Mutate(x => x.DrawText($"{last.MangaTitle.TrimToLength(29)}", titleFont, fColor, new Point(25, startY + (35 * max))));
-                    image.Mutate(x => x.DrawText($"{last.ChapterNo} / {last.ChaptersCnt}", titleFont, fColor, new Point(25, startY + 11 + (35 * max))));
-                }
-            }
-
-            return image;
-        }
-
-        public async Task<Image<Rgba32>> GetSiteStatisticAsync(IUserInfo shindenInfo, Discord.Color color, List<ILastReaded> lastRead = null, List<ILastWatched> lastWatch = null)
-        {
-            if (color == Discord.Color.Default)
-                color = Discord.Color.DarkerGrey;
-
-            var baseImg = new Image<Rgba32>(500, 320);
-            baseImg.Mutate(x => x.BackgroundColor(GetOrCreateColor("#313338")));
-
-            using (var template = Image.Load(Dir.GetResource("siteStatsBody.png")))
-            {
-                baseImg.Mutate(x => x.DrawImage(template, new Point(0, 0), 1));
-            }
-
-            using (var image = new Image<Rgba32>(325, 248))
-            {
-                if (shindenInfo?.ListStats?.AnimeStatus != null)
-                {
-                    using var stats = GetRWStats(shindenInfo?.ListStats?.AnimeStatus, Dir.GetResource("statsAnime.png"), shindenInfo.GetMoreSeriesStats(false));
-                    image.Mutate(x => x.DrawImage(stats, new Point(0, 0), 1));
-                }
-                if (shindenInfo?.ListStats?.MangaStatus != null)
-                {
-                    using var stats = GetRWStats(shindenInfo?.ListStats?.MangaStatus, Dir.GetResource("statsManga.png"), shindenInfo.GetMoreSeriesStats(true));
-                    image.Mutate(x => x.DrawImage(stats, new Point(0, 128), 1));
-                }
-                baseImg.Mutate(x => x.DrawImage(image, new Point(5, 65), 1));
-            }
-
-            using (var image = await GetLastRWList(lastRead, lastWatch))
-            {
-                baseImg.Mutate(x => x.DrawImage(image, new Point(330, 63), 1));
-            }
-
-            using (var avatar = await GetSiteStatisticUserBadge(shindenInfo.AvatarUrl, shindenInfo.Name, color.RawValue.ToString("X6")))
-            {
-                if (avatar.Frames.Count > 1)
-                {
-                    Animate(baseImg, avatar, new Point(0, 0));
-                }
-                else
-                {
-                    baseImg.Mutate(x => x.DrawImage(avatar, new Point(0, 0), 1));
-                }
-            }
-
-            return baseImg;
-        }
-
-        public async Task<Image<Rgba32>> GetLevelUpBadgeAsync(string name, long ulvl, string avatarUrl, Discord.Color color)
-        {
-            if (color == Discord.Color.Default)
-                color = Discord.Color.DarkerGrey;
-
-            var msgText1 = "POZIOM";
-            var msgText2 = "Awansuje na:";
-
-            var textFont = GetOrCreateFont(_latoRegular, 16);
-            var nickNameFont = GetOrCreateFont(_latoBold, 22);
-            var lvlFont = GetOrCreateFont(_latoBold, 36);
-
-            var msgText1Length = TextMeasurer.MeasureSize(msgText1, new TextOptions(textFont));
-            var msgText2Length = TextMeasurer.MeasureSize(msgText2, new TextOptions(textFont));
-            var nameLength = TextMeasurer.MeasureSize(name, new TextOptions(nickNameFont));
-            var lvlLength = TextMeasurer.MeasureSize($"{ulvl}", new TextOptions(lvlFont));
-
-            var textLength = lvlLength.Width + msgText1Length.Width > nameLength.Width ? lvlLength.Width + msgText1Length.Width : nameLength.Width;
-            var estimatedLength = 106 + (int)(textLength > msgText2Length.Width ? textLength : msgText2Length.Width);
-
-            var nickNameColor = color.RawValue.ToString("X6");
-            var baseImg = new Image<Rgba32>((int)estimatedLength, 100);
-
-            baseImg.Mutate(x => x.BackgroundColor(GetOrCreateColor("#313338")));
-            baseImg.Mutate(x => x.DrawText(msgText1, textFont, Color.Gray, new PointF(98 + lvlLength.Width + 4, 76)));
-            baseImg.Mutate(x => x.DrawText(name, nickNameFont, GetOrCreateColor(nickNameColor), new Point(98, 7)));
-            baseImg.Mutate(x => x.DrawText(msgText2, textFont, Color.Gray, new Point(98, 31)));
-            baseImg.Mutate(x => x.DrawText($"{ulvl}", lvlFont, Color.Gray, new Point(96, 58)));
-
-            using (var colorRec = new Image<Rgba32>(82, 82))
-            {
-                colorRec.Mutate(x => x.BackgroundColor(GetOrCreateColor(nickNameColor)));
-                baseImg.Mutate(x => x.DrawImage(colorRec, new Point(9, 9), 1));
-
-                using (var stream = await GetImageFromUrlAsync(avatarUrl))
-                {
-                    if (stream is null || stream == Stream.Null)
-                        return baseImg;
-
-                    using (var avatar = Image.Load(stream))
-                    {
-                        avatar.Mutate(x => x.Resize(new ResizeOptions
-                        {
-                            Mode = ResizeMode.Crop,
-                            Size = new Size(80, 80)
-                        }));
-
-                        if (avatar.Frames.Count > 1)
-                        {
-                            Animate(baseImg, avatar, new Point(10, 10));
-                        }
-                        else
-                        {
-                            baseImg.Mutate(x => x.DrawImage(avatar, new Point(10, 10), 1));
-                        }
-                    }
-                }
-            }
-
-            return baseImg;
         }
 
         private bool Animate(Image staleImage, Image animation, Point point)
@@ -1506,10 +1331,58 @@ namespace Sanakan.Services
             return imgBase;
         }
 
-        private async Task<Image> GetCharacterPictureAsync(string characterUrl, bool ultimate)
+        // A failed download would be saved into the card file for good, so a remote picture gets a few attempts
+        // and a final failure is logged. Returns null when the picture could not be loaded.
+        internal async Task<Image> LoadCharacterPictureAsync(string url, ulong cardId, CardPictureCache pictures = null, bool userImage = false)
         {
-            var characterImg = ultimate ? new Image<Rgba32>(475, 667) : await Image.LoadAsync(Dir.GetResource("PW/empty.png"));
-            using (var image = await GetImageFromUrlOrLocalAsync(characterUrl ?? "http://cdn.shinden.eu/cdn1/other/placeholders/title/225x350.jpg"))
+            if (Dir.IsLocal(url))
+                return await GetImageFromUrlOrLocalAsync(url);
+
+            if (pictures != null && pictures.TryGet(url, out var cached))
+                return cached is null ? null : Image.Load(cached);
+
+            var failure = new DownloadFailure();
+            for (int attempt = 1; attempt <= CharacterPictureAttempts; attempt++)
+            {
+                try
+                {
+                    using var stream = await GetImageFromUrlAsync(url, true, failure);
+                    if (stream != null && stream != Stream.Null)
+                    {
+                        var image = await Image.LoadAsync(stream);
+                        pictures?.Add(url, stream);
+                        return image;
+                    }
+                }
+                catch (Exception ex)
+                {
+                    failure.Set(ex);
+                }
+
+                if (failure.StatusCode == HttpStatusCode.TooManyRequests)
+                    break;
+
+                if (attempt < CharacterPictureAttempts)
+                    await Task.Delay(CharacterPictureRetryDelayMs * attempt);
+            }
+
+            pictures?.Add(url, null);
+            var message = $"Images: character picture for card {cardId} could not be downloaded ({failure.Reason ?? "unknown"}): {url}";
+            // a rate limit on the image host is temporary and nothing can be done about it, so it stays off the log channel
+            // (same for a picture set by the player that no longer exists - it is the player's data, not a bot error)
+            if (failure.StatusCode == HttpStatusCode.TooManyRequests
+                || (userImage && failure.StatusCode is HttpStatusCode.NotFound or HttpStatusCode.Gone))
+                _logger?.LogRoutine(message);
+            else
+                _logger?.LogError(message);
+            return null;
+        }
+
+        private async Task<Image> GetCharacterPictureAsync(Card card, CardPictureCache pictures)
+        {
+            var characterImg = card.FromFigure ? new Image<Rgba32>(475, 667) : await Image.LoadAsync(Dir.GetResource("PW/empty.png"));
+            using (var image = await LoadCharacterPictureAsync(card.GetImage() ?? "http://cdn.shinden.eu/cdn1/other/placeholders/title/225x350.jpg",
+                card.Id, pictures, card.CustomImage != null))
             {
                 if (image is null)
                     return characterImg;
@@ -2182,13 +2055,13 @@ namespace Sanakan.Services
             }
         }
 
-        private async Task<Image<Rgba32>> GetWaifuCardNoStatsAsync(Card card)
+        private async Task<Image<Rgba32>> GetWaifuCardNoStatsAsync(Card card, CardPictureCache pictures)
         {
             var image = new Image<Rgba32>(475, 667);
 
             ApplyBorderBack(image, card);
 
-            using (var chara = await GetCharacterPictureAsync(card.GetImage(), card.FromFigure))
+            using (var chara = await GetCharacterPictureAsync(card, pictures))
             {
                 var mov = card.FromFigure ? 0 : 13;
                 image.Mutate(x => x.DrawImage(chara, new Point(mov, mov), 1));
@@ -2217,19 +2090,21 @@ namespace Sanakan.Services
             return await GetWaifuInProfileCardAsync(card);
         }
 
-        public async Task<Image> GetWaifuInProfileCardAsync(Card card)
+        public Task<Image> GetWaifuInProfileCardAsync(Card card) => GetWaifuInProfileCardAsync(card, null);
+
+        public virtual async Task<Image> GetWaifuInProfileCardAsync(Card card, CardPictureCache pictures)
         {
             if (card.Quality == Quality.Omega)
-                return await GetOmegaCard(card, true);
+                return await GetOmegaCard(card, true, pictures);
 
             if (card.IsAnimatedImage)
-                return await GetAnimatedWaifuCardAsync(card, true);
+                return await GetAnimatedWaifuCardAsync(card, true, pictures);
 
             var image = new Image<Rgba32>(475, 667);
 
             ApplyBorderBack(image, card);
 
-            using (var chara = await GetCharacterPictureAsync(card.GetImage(), card.FromFigure))
+            using (var chara = await GetCharacterPictureAsync(card, pictures))
             {
                 var mov = card.FromFigure ? 0 : 13;
                 image.Mutate(x => x.DrawImage(chara, new Point(mov, mov), 1));
@@ -2305,15 +2180,17 @@ namespace Sanakan.Services
             return Image.Load(url);
         }
 
-        public async Task<Image> GetWaifuCardAsync(Card card)
+        public Task<Image> GetWaifuCardAsync(Card card) => GetWaifuCardAsync(card, null);
+
+        public virtual async Task<Image> GetWaifuCardAsync(Card card, CardPictureCache pictures)
         {
             if (card.Quality == Quality.Omega)
-                return await GetOmegaCard(card);
+                return await GetOmegaCard(card, false, pictures);
 
             if (card.IsAnimatedImage)
-                return await GetAnimatedWaifuCardAsync(card);
+                return await GetAnimatedWaifuCardAsync(card, false, pictures);
 
-            var image = await GetWaifuCardNoStatsAsync(card);
+            var image = await GetWaifuCardNoStatsAsync(card, pictures);
 
             if (card.FromFigure)
             {
@@ -2343,9 +2220,9 @@ namespace Sanakan.Services
             return await LoadWebpFromStreamAsync(fileStream);
         }
 
-        private async Task<Image> GetOmegaCard(Card card, bool noStatsImage = false)
+        private async Task<Image> GetOmegaCard(Card card, bool noStatsImage, CardPictureCache pictures)
         {
-            using (var image = await GetImageFromUrlOrLocalAsync(card.GetImage() ?? "http://cdn.shinden.eu/cdn1/other/placeholders/title/225x350.jpg"))
+            using (var image = await GetImageFromUrlOrLocalAsync(card.GetImage() ?? "http://cdn.shinden.eu/cdn1/other/placeholders/title/225x350.jpg", pictures))
             {
                 using var dere = await Image.LoadAsync(Dir.GetResource($"PW/CG/{card.Quality}/Dere/{card.Dere}.png"));
                 using var stats = await Image.LoadAsync(Dir.GetResource($"PW/CG/{card.Quality}/Stats.png"));
@@ -2384,10 +2261,10 @@ namespace Sanakan.Services
             }
         }
 
-        private async Task<Image> GetAnimatedWaifuCardAsync(Card card, bool noStatsImage = false)
+        private async Task<Image> GetAnimatedWaifuCardAsync(Card card, bool noStatsImage, CardPictureCache pictures)
         {
             using var characterImg = card.FromFigure ? new Image<Rgba32>(475, 667) : Image.Load(Dir.GetResource("PW/empty.png"));
-            using (var cardImg = await GetImageFromUrlOrLocalAsync(card.GetImage() ?? "http://cdn.shinden.eu/cdn1/other/placeholders/title/225x350.jpg"))
+            using (var cardImg = await GetImageFromUrlOrLocalAsync(card.GetImage() ?? "http://cdn.shinden.eu/cdn1/other/placeholders/title/225x350.jpg", pictures))
             {
                 using (var image = cardImg is null ? characterImg : cardImg)
                 {

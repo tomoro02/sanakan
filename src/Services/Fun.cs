@@ -43,18 +43,18 @@ namespace Sanakan.Services
         private static ConcurrentDictionary<ulong, int> _fakeKc = new ConcurrentDictionary<ulong, int>();
         private static List<string> _botReactions = new List<string>()
         {
-            "https://sanakan.pl/i/gif/mute_1.gif",
-            "https://sanakan.pl/i/gif/mute_2.gif",
-            "https://sanakan.pl/i/gif/mute_3.gif",
-            "https://sanakan.pl/i/gif/mute_4.gif",
-            "https://sanakan.pl/i/gif/mute_5.gif",
-            "https://sanakan.pl/i/gif/mute_6.gif",
-            "https://sanakan.pl/i/gif/mute_7.gif",
-            "https://sanakan.pl/i/gif/mute_8.gif",
-            "https://sanakan.pl/i/gif/mute_9.gif",
-            "https://sanakan.pl/i/gif/mute_10.gif",
-            "https://sanakan.pl/i/gif/mute_11.gif",
-            "https://sanakan.pl/i/gif/mute_12.gif"
+            "https://sanakan.pl/i/gif/mute_1.webp",
+            "https://sanakan.pl/i/gif/mute_2.webp",
+            "https://sanakan.pl/i/gif/mute_3.webp",
+            "https://sanakan.pl/i/gif/mute_4.webp",
+            "https://sanakan.pl/i/gif/mute_5.webp",
+            "https://sanakan.pl/i/gif/mute_6.webp",
+            "https://sanakan.pl/i/gif/mute_7.webp",
+            "https://sanakan.pl/i/gif/mute_8.webp",
+            "https://sanakan.pl/i/gif/mute_9.webp",
+            "https://sanakan.pl/i/gif/mute_10.webp",
+            "https://sanakan.pl/i/gif/mute_11.webp",
+            "https://sanakan.pl/i/gif/mute_12.webp"
         };
 
         public static int GetAFKC(ulong charId)
@@ -67,6 +67,8 @@ namespace Sanakan.Services
         public static string GetRandomMuteReactionGif() => GetOneRandomFrom(_botReactions);
 
         public static int GetRandomValue(int min, int max) => RandomNumberGenerator.GetInt32(min, max);
+
+        public static int GetRandomValueInclusive(int min, int max) => GetRandomValue(min, max + 1);
 
         public static bool TakeATry(double percent) => ((double) GetRandomValue(10000) / 100) < percent;
 
@@ -84,7 +86,7 @@ namespace Sanakan.Services
 
         public string GetSlotMachineInfo()
         {
-            return $"**Nastawa** / **Wartośći** \n"
+            return $"**Nastawa** / **Wartości** \n"
                     + $"Info `(wypisywanie informacji)`\n"
                     + $"Mnożnik / `1`, `2`, `3`\n"
                     + $"Stawka / `1`, `10`, `100`\n"

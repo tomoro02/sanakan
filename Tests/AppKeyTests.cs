@@ -79,13 +79,13 @@ namespace Artifacts
 
     public class AppKeyHandlerTests
     {
-        private static async Task<AuthenticateResult> AuthenticateAsync(FakeConfig config, string appKey)
+        private static async Task<AuthenticateResult> AuthenticateAsync(FakeConfig config, string appKey, Sanakan.Api.ITokenAttemptGuard guard = null)
         {
             var options = new Mock<IOptionsMonitor<AuthenticationSchemeOptions>>();
             options.Setup(x => x.Get(It.IsAny<string>())).Returns(new AuthenticationSchemeOptions());
 
             var handler = new AppKeyAuthenticationHandler(options.Object, NullLoggerFactory.Instance,
-                UrlEncoder.Default, new SystemClock(), config);
+                UrlEncoder.Default, new SystemClock(), config, guard ?? new Sanakan.Api.TokenAttemptGuard(new FixedTime()));
 
             var context = new DefaultHttpContext();
             if (appKey != null) context.Request.Headers[AppKeyAuthenticationHandler.HeaderName] = appKey;
@@ -120,6 +120,34 @@ namespace Artifacts
 
             Assert.False(result.Succeeded);
             Assert.NotNull(result.Failure);
+        }
+
+        [Fact]
+        public async Task RepeatedInvalidKeys_LockOutEvenValidKey()
+        {
+            var config = Config(ApiAppPermission.Info);
+            var guard = new Sanakan.Api.TokenAttemptGuard(new FixedTime { Value = System.DateTime.Now });
+
+            for (int i = 0; i < Sanakan.Api.TokenAttemptGuard.MaxAttempts; i++)
+                Assert.False((await AuthenticateAsync(config, $"guess-{i}", guard)).Succeeded);
+
+            Assert.False((await AuthenticateAsync(config, "app-key", guard)).Succeeded);
+        }
+
+        [Fact]
+        public async Task ValidKey_DoesNotResetFailedAttempts()
+        {
+            var config = Config(ApiAppPermission.Info);
+            var guard = new Sanakan.Api.TokenAttemptGuard(new FixedTime { Value = System.DateTime.Now });
+
+            for (int i = 0; i < Sanakan.Api.TokenAttemptGuard.MaxAttempts - 1; i++)
+            {
+                Assert.False((await AuthenticateAsync(config, $"guess-{i}", guard)).Succeeded);
+                Assert.True((await AuthenticateAsync(config, "app-key", guard)).Succeeded);
+            }
+
+            Assert.False((await AuthenticateAsync(config, "last-guess", guard)).Succeeded);
+            Assert.False((await AuthenticateAsync(config, "app-key", guard)).Succeeded);
         }
 
         [Fact]
@@ -242,7 +270,7 @@ namespace Artifacts
         {
             var config = new FakeConfig();
             config.Model.UserKeyApps.Add(new ApiApp { Key = "app-key", Bearer = "app", Permissions = permissions });
-            return new UserKeyController(config, new FixedTime())
+            return new UserKeyController(config, new FixedTime(), new Sanakan.Api.TokenAttemptGuard(new FixedTime()))
             {
                 ControllerContext = new ControllerContext { HttpContext = new DefaultHttpContext() }
             };
@@ -257,6 +285,40 @@ namespace Artifacts
         {
             Assert.Equal(403, (await Controller(permissions).GenerateUserKeyAsync(1, "app-key") as ObjectResult)?.StatusCode);
             Assert.Equal(403, (await Controller(permissions).RevokeUserKeyAsync(1, "app-key") as ObjectResult)?.StatusCode);
+        }
+
+        [Fact]
+        public async Task RealKeyWithoutPermission_IsNotCountedAsGuess()
+        {
+            var config = new FakeConfig();
+            config.Model.UserKeyApps.Add(new ApiApp { Key = "info-key", Bearer = "info", Permissions = ApiAppPermission.Info });
+            var guard = new Sanakan.Api.TokenAttemptGuard(new FixedTime { Value = System.DateTime.Now });
+            var controller = new UserKeyController(config, new FixedTime(), guard)
+            {
+                ControllerContext = new ControllerContext { HttpContext = new DefaultHttpContext() }
+            };
+
+            for (int i = 0; i < Sanakan.Api.TokenAttemptGuard.MaxAttempts + 1; i++)
+                Assert.Equal(403, (await controller.GenerateUserKeyAsync(1, "info-key") as ObjectResult)?.StatusCode);
+
+            Assert.False(guard.IsLocked(Sanakan.Api.TokenAttemptGuard.ClientKey(controller.HttpContext), out _));
+        }
+
+        [Fact]
+        public async Task RepeatedInvalidKeys_LockOutEvenValidKey()
+        {
+            var config = new FakeConfig();
+            config.Model.UserKeyApps.Add(new ApiApp { Key = "app-key", Bearer = "app", Permissions = ApiAppPermission.UserKeys });
+            var controller = new UserKeyController(config, new FixedTime(), new Sanakan.Api.TokenAttemptGuard(new FixedTime { Value = System.DateTime.Now }))
+            {
+                ControllerContext = new ControllerContext { HttpContext = new DefaultHttpContext() }
+            };
+
+            for (int i = 0; i < Sanakan.Api.TokenAttemptGuard.MaxAttempts; i++)
+                Assert.Equal(403, (await controller.GenerateUserKeyAsync(1, $"guess-{i}") as ObjectResult)?.StatusCode);
+
+            Assert.Equal(429, (await controller.GenerateUserKeyAsync(1, "app-key") as ObjectResult)?.StatusCode);
+            Assert.Equal(429, (await controller.RevokeUserKeyAsync(1, "app-key") as ObjectResult)?.StatusCode);
         }
     }
 
@@ -305,6 +367,19 @@ namespace Artifacts
         }
 
         [Fact]
+        public async Task InfoEndpoint_AfterRepeatedInvalidKeys_RejectsValidKey()
+        {
+            for (int i = 0; i < Sanakan.Api.TokenAttemptGuard.MaxAttempts; i++)
+            {
+                using var bad = new HttpRequestMessage(HttpMethod.Get, PrivateCommands);
+                bad.Headers.Add(AppKeyAuthenticationHandler.HeaderName, $"guess-{i}");
+                Assert.Equal(HttpStatusCode.Unauthorized, (await _api.Client.SendAsync(bad)).StatusCode);
+            }
+
+            Assert.Equal(HttpStatusCode.Unauthorized, (await WithAppKey("info-app").GetAsync(PrivateCommands)).StatusCode);
+        }
+
+        [Fact]
         public async Task PrivateCommands_SiteToken_ReturnsModules()
         {
             var res = await (await _api.AsSiteAsync()).GetAsync(PrivateCommands);
@@ -347,7 +422,19 @@ namespace Artifacts
         {
             await _api.AsSiteAsync();
             Assert.Equal(HttpStatusCode.OK, (await WithAppKey(key).GetAsync(PrivateCommands)).StatusCode);
-            Assert.Equal(HttpStatusCode.OK, (await _api.Client.GetAsync("/api/richmessage")).StatusCode);
+            Assert.Equal(HttpStatusCode.OK, (await ApiServer.PostSiteEndpointAsync(_api.Client)).StatusCode);
+        }
+
+        [Fact]
+        public async Task SiteToken_WithStaleAppKey_DoesNotCountAsFailedAttempt()
+        {
+            await _api.AsSiteAsync();
+            for (int i = 0; i < Sanakan.Api.TokenAttemptGuard.MaxAttempts + 1; i++)
+                Assert.Equal(HttpStatusCode.OK, (await WithAppKey("wrong").GetAsync(PrivateCommands)).StatusCode);
+
+            _api.Client.DefaultRequestHeaders.Authorization = null;
+            _api.Client.DefaultRequestHeaders.Remove(AppKeyAuthenticationHandler.HeaderName);
+            Assert.Equal(HttpStatusCode.OK, (await WithAppKey("info-app").GetAsync(PrivateCommands)).StatusCode);
         }
 
         // bot nie jest połączony z Discordem, więc 404 o serwerze oznacza, że polityka przepuściła zapytanie
@@ -379,7 +466,6 @@ namespace Artifacts
         {
             var client = WithAppKey("site-app");
 
-            Assert.Equal(HttpStatusCode.OK, (await client.GetAsync("/api/richmessage")).StatusCode);
             Assert.Equal(HttpStatusCode.OK, (await client.PostAsync("/api/waifu/cards/character/5/update", ApiServer.Json("{}"))).StatusCode);
             Assert.Single(_api.Executor.Added);
         }
@@ -391,7 +477,6 @@ namespace Artifacts
         {
             var client = WithAppKey(key);
 
-            Assert.Equal(HttpStatusCode.Forbidden, (await client.GetAsync("/api/richmessage")).StatusCode);
             Assert.Equal(HttpStatusCode.Forbidden, (await client.PostAsync("/api/waifu/cards/character/5/update", ApiServer.Json("{}"))).StatusCode);
             Assert.Empty(_api.Executor.Added);
         }
@@ -399,13 +484,40 @@ namespace Artifacts
         [Fact]
         public async Task SiteEndpoint_InvalidAppKey_Returns401()
         {
-            Assert.Equal(HttpStatusCode.Unauthorized, (await WithAppKey("wrong").GetAsync("/api/richmessage")).StatusCode);
+            Assert.Equal(HttpStatusCode.Unauthorized, (await ApiServer.PostSiteEndpointAsync(WithAppKey("wrong"))).StatusCode);
         }
 
         [Fact]
         public async Task PlayerEndpoint_DoesNotAcceptAppKey()
         {
             Assert.Equal(HttpStatusCode.Unauthorized, (await WithAppKey("site-app").GetAsync("/api/userkey/me")).StatusCode);
+        }
+
+        [Theory]
+        [InlineData(null, HttpStatusCode.Unauthorized)]
+        [InlineData("info-app", HttpStatusCode.Forbidden)]
+        [InlineData("userkeys-app", HttpStatusCode.Forbidden)]
+        [InlineData("site-app", HttpStatusCode.BadRequest)]
+        public async Task Disconnect_RequiresSitePermission(string key, HttpStatusCode expected)
+        {
+            var client = key == null ? _api.Client : WithAppKey(key);
+
+            Assert.Equal(expected, (await client.DeleteAsync("/api/user/discord/0/shinden/42")).StatusCode);
+            Assert.Empty(_api.Executor.Added);
+        }
+
+        [Fact]
+        public async Task Disconnect_PlayerToken_Returns403()
+        {
+            Assert.Equal(HttpStatusCode.Forbidden,
+                (await AsPlayer().DeleteAsync("/api/user/discord/0/shinden/42")).StatusCode);
+        }
+
+        [Fact]
+        public async Task Disconnect_SiteToken_PassesPolicy()
+        {
+            Assert.Equal(HttpStatusCode.BadRequest,
+                (await (await _api.AsSiteAsync()).DeleteAsync("/api/user/discord/0/shinden/42")).StatusCode);
         }
     }
 }

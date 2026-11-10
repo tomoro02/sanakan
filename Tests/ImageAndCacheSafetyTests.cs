@@ -17,23 +17,44 @@ namespace Artifacts
     // lokalny serwer HTTP na localhost, bez dostępu do internetu
     public sealed class LocalHttpServer : IDisposable
     {
-        private readonly HttpListener _listener = new HttpListener();
+        private readonly HttpListener _listener;
         private readonly Func<HttpListenerContext, Task> _handler;
 
         public string BaseUrl { get; }
 
         public LocalHttpServer(Func<HttpListenerContext, Task> handler)
         {
+            _handler = handler;
+
+            // the free port can be taken by a parallel test before HttpListener binds it, so retry with another one
+            for (int attempt = 1; ; attempt++)
+            {
+                var url = $"http://localhost:{FreePort()}/";
+                var listener = new HttpListener();
+                listener.Prefixes.Add(url);
+                try
+                {
+                    listener.Start();
+                    _listener = listener;
+                    BaseUrl = url;
+                    break;
+                }
+                catch (HttpListenerException) when (attempt < 10)
+                {
+                    listener.Close();
+                }
+            }
+
+            _ = Task.Run(LoopAsync);
+        }
+
+        private static int FreePort()
+        {
             var listener = new TcpListener(IPAddress.Loopback, 0);
             listener.Start();
             var port = ((IPEndPoint)listener.LocalEndpoint).Port;
             listener.Stop();
-
-            BaseUrl = $"http://localhost:{port}/";
-            _handler = handler;
-            _listener.Prefixes.Add(BaseUrl);
-            _listener.Start();
-            _ = Task.Run(LoopAsync);
+            return port;
         }
 
         private async Task LoopAsync()
@@ -75,7 +96,7 @@ namespace Artifacts
         }
 
         private static async Task<Stream> DownloadAsync(ImageProcessing img, string url)
-            => await (Task<Stream>)DownloadMethod.Invoke(img, new object[] { url });
+            => await (Task<Stream>)DownloadMethod.Invoke(img, new object[] { url, null });
 
         private static Func<HttpListenerContext, Task> Serve(byte[] body, string type = "image/png")
             => async ctx =>

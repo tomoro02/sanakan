@@ -13,7 +13,6 @@ using Newtonsoft.Json.Converters;
 using Newtonsoft.Json.Serialization;
 using Sanakan.Api.Models;
 using Sanakan.Config;
-using Shinden.Logger;
 
 namespace Sanakan.Services
 {
@@ -157,7 +156,7 @@ namespace Sanakan.Services
             if (_failing)
             {
                 _failing = false;
-                _logger.Log("Heartbeat: wysyłanie znowu działa.");
+                _logger.Log("Heartbeat: sending works again");
             }
             return true;
         }
@@ -169,7 +168,7 @@ namespace Sanakan.Services
             if (!_failing)
             {
                 _failing = true;
-                _logger.LogError($"Heartbeat: nie udało się wysłać stanu: {reason}");
+                _logger.LogError($"Heartbeat: failed to send state: {reason}");
             }
             return false;
         }

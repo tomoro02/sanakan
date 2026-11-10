@@ -1,6 +1,7 @@
 ﻿#pragma warning disable 1591
 
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Linq;
 using System.Threading.Tasks;
@@ -8,17 +9,18 @@ using Discord;
 using Discord.WebSocket;
 using Sanakan.Config;
 using Sanakan.Extensions;
-using Shinden.Logger;
 
 namespace Sanakan.Services
 {
     public class DeletedLog
     {
+        private static readonly ConcurrentDictionary<ulong, byte> _skipped = new ConcurrentDictionary<ulong, byte>();
+
         private DiscordSocketClient _client;
         private IConfig _config;
         private ILogger _logger;
 
-        private enum VoiceActionType
+        public enum VoiceActionType
         {
             Join, Left, Changed
         }
@@ -33,6 +35,11 @@ namespace Sanakan.Services
             _client.MessageUpdated += HandleUpdatedMsgAsync;
             _client.UserVoiceStateUpdated += HandleVoiceStateUpdatedAsync;
         }
+
+        // The bot deletes messages containing secrets; their content must not be reposted to the log channel.
+        public static void Skip(ulong messageId) => _skipped.TryAdd(messageId, 0);
+
+        public static bool ConsumeSkip(ulong messageId) => _skipped.TryRemove(messageId, out _);
 
         private Task HandleVoiceStateUpdatedAsync(SocketUser user, SocketVoiceState oldState, SocketVoiceState newState)
         {
@@ -92,6 +99,8 @@ namespace Sanakan.Services
 
         private Task HandleDeletedMsgAsync(Cacheable<IMessage, ulong> message, Cacheable<IMessageChannel, ulong> channel)
         {
+            if (ConsumeSkip(message.Id)) return Task.CompletedTask;
+
             if (!message.HasValue) return Task.CompletedTask;
 
             if (message.Value.Author.IsBot || message.Value.Author.IsWebhook) return Task.CompletedTask;
@@ -132,33 +141,33 @@ namespace Sanakan.Services
                 var ch = guild.GetTextChannel(config.LogChannel);
                 if (ch == null) return;
 
-                await ch.SendMessageAsync("", embed: BuildVoiceMessage(user, action, oldChannel?.Name ?? "??", newChannel?.Name ?? "??"));
+                await ch.SendMessageAsync("", embed: BuildVoiceMessage(user, action, oldChannel?.Id, newChannel?.Id));
             }
         }
 
-        private Embed BuildVoiceMessage(SocketUser user, VoiceActionType action, string oldChannel, string newChannel)
-        {
-            var color = action switch
+        private static Embed BuildVoiceMessage(IUser user, VoiceActionType action, ulong? oldChannel, ulong? newChannel)
+            => new EmbedBuilder
             {
-                VoiceActionType.Join => EMType.Success.Color(),
-                VoiceActionType.Left => EMType.Error.Color(),
-                _ => EMType.Bot.Color()
-            };
-
-            var text = action switch
-            {
-                VoiceActionType.Left => $"[VA] Opuścił kanał: {oldChannel}",
-                VoiceActionType.Join => $"[VA] Dołączył do kanału: {newChannel}",
-                _ => $"[VA] Zmienił kanał z: {oldChannel} na: {newChannel}"
-            };
-
-            return new EmbedBuilder
-            {
-                Color = color,
+                Color = action switch
+                {
+                    VoiceActionType.Join => JoinedColor,
+                    VoiceActionType.Left => DeletedColor,
+                    _ => EditedColor
+                },
                 Author = new EmbedAuthorBuilder().WithUser(user, true),
-                Description = text,
+                Description = VoiceText(action, oldChannel, newChannel),
             }.Build();
-        }
+
+        public static string VoiceText(VoiceActionType action, ulong? oldChannel, ulong? newChannel) => action switch
+        {
+            VoiceActionType.Left => $"📤 Wyszedł z {ChannelMention(oldChannel)}",
+            VoiceActionType.Join => $"🎙️ Dołączył do {ChannelMention(newChannel)}",
+            _ => $"🔀 Przeszedł z {ChannelMention(oldChannel)} na {ChannelMention(newChannel)}"
+        };
+
+        private static string ChannelMention(ulong? id) => id.HasValue ? $"<#{id.Value}>" : "??";
+
+        private static readonly Color JoinedColor = new Color(59, 165, 93);
 
         private async Task LogMessageAsync(SocketGuildChannel channel, IMessage oldMessage, IMessage newMessage = null)
         {
@@ -172,54 +181,40 @@ namespace Sanakan.Services
                 var ch = channel.Guild.GetTextChannel(config.LogChannel);
                 if (ch == null) return;
 
-                var jump = (newMessage == null) ? "" : $"{newMessage.GetJumpUrl()}";
-                await ch.SendMessageAsync(jump, embed: BuildMessage(oldMessage, newMessage));
+                await ch.SendMessageAsync("", embed: BuildMessage(oldMessage, newMessage, DateTimeOffset.Now));
             }
         }
 
-        private Embed BuildMessage(IMessage oldMessage, IMessage newMessage)
+        public static Embed BuildMessage(IMessage oldMessage, IMessage newMessage, DateTimeOffset now)
         {
-            string content = (newMessage == null) ? oldMessage.Content
-                : $"**Stara:**\n{oldMessage.Content}\n\n**Nowa:**\n{newMessage.Content}";
+            var deleted = newMessage == null;
+            var content = deleted ? TextOrPlaceholder(oldMessage.Content)
+                : $"**Stara:**\n{TextOrPlaceholder(oldMessage.Content)}\n\n**Nowa:**\n{TextOrPlaceholder(newMessage.Content)}";
 
-            return new EmbedBuilder
+            var embed = new EmbedBuilder
             {
-                Color = (newMessage == null) ? EMType.Warning.Color() : EMType.Info.Color(),
+                Title = deleted ? "🗑️ Usunięta wiadomość" : "✏️ Edytowana wiadomość",
+                Url = deleted ? null : newMessage.GetJumpUrl(),
+                Color = deleted ? DeletedColor : EditedColor,
                 Author = new EmbedAuthorBuilder().WithUser(oldMessage.Author, true),
-                Fields = GetFields(oldMessage, newMessage == null),
                 Description = content.TrimToLength(),
-            }.Build();
-        }
-
-        private List<EmbedFieldBuilder> GetFields(IMessage message, bool deleted)
-        {
-            var fields = new List<EmbedFieldBuilder>
-            {
-                new EmbedFieldBuilder
-                {
-                    IsInline = true,
-                    Name = deleted ? "Napisano:" : "Edytowano:",
-                    Value = message.GetLocalCreatedAtShortDateTime()
-                },
-                new EmbedFieldBuilder
-                {
-                    IsInline = true,
-                    Name = "Kanał:",
-                    Value = message.Channel.Name
-                }
-            };
-
-            if (deleted)
-            {
-                fields.Add(new EmbedFieldBuilder
-                {
-                    IsInline = true,
-                    Name = "Załączniki:",
-                    Value = message.Attachments?.Count
-                });
+                Footer = new EmbedFooterBuilder().WithText(deleted ? "Usunięto" : "Edytowano"),
+                Timestamp = deleted ? now : newMessage.EditedTimestamp ?? now,
             }
+            .AddField("Kanał", $"<#{oldMessage.Channel.Id}>", true)
+            .AddField("Napisano", $"<t:{oldMessage.CreatedAt.ToUnixTimeSeconds()}:f>", true);
 
-            return fields;
+            var attachments = oldMessage.Attachments?.Count ?? 0;
+            if (deleted && attachments > 0)
+                embed.AddField("Załączniki", attachments, true);
+
+            return embed.Build();
         }
+
+        private static readonly Color DeletedColor = new Color(229, 72, 77);
+        private static readonly Color EditedColor = new Color(91, 141, 239);
+
+        private static string TextOrPlaceholder(string content)
+            => string.IsNullOrWhiteSpace(content) ? "*brak tekstu*" : content;
     }
 }

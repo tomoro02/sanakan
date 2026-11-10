@@ -31,6 +31,7 @@ namespace Sanakan.Services.PocketWaifu
         CustomBarOpacity,
         OverlayVisibility,
         PremiumOverlayVisibility,
+        Code,
     }
 
     public class ProfileConfig
@@ -59,21 +60,21 @@ namespace Sanakan.Services.PocketWaifu
         private readonly static List<OptionInfo> _help =  new List<OptionInfo>()
         {
             new OptionInfo("jestem leniwy", "Ustawia tło profilu od razu z wybranym stylem, wymaga podania obrazka - 750 x 500px.",
-                "konfiguracja profilu jestem leniwy https://sanakan.pl/i/example_profile_full.png", "`typ` `bezpośredni link do obrazka`",
+                "konfiguracja profilu jestem leniwy https://sanakan.pl/i/example_profile_full.webp", "`typ` `bezpośredni link do obrazka`",
                 $"{ToPay(ProfileConfigType.BackgroundAndStyle, CurrencyType.SC)} / {ToPay(ProfileConfigType.BackgroundAndStyle, CurrencyType.TC)}",
                 $"**[2]** obrazek\n**[3]** obrazek na statystykach\n**[5]** duża galeria na obrazku\n**[6]** statystyki na obrazku\n**[8]** galeria z karcianką na obrazku"),
 
             new OptionInfo("tło", "Pozwala ustawić obrazek w górnej części profilu o wymiarach 750 x 160px.",
-                "konfiguracja profilu tło https://sanakan.pl/i/example_new_profile_bg.png", "`bezpośredni link do obrazka`",
+                "konfiguracja profilu tło https://sanakan.pl/i/example_new_profile_bg.webp", "`bezpośredni link do obrazka`",
                 $"{ToPay(ProfileConfigType.Background, CurrencyType.SC)} / {ToPay(ProfileConfigType.Background, CurrencyType.TC)}"),
 
             new OptionInfo("styl", "Pozwala zmienić dolny wygląd profilu oraz ustawić tam obrazek o wymiarach 750 x 340px, gdy styl tego wymaga.",
-                "konfiguracja profilu styl obrazek https://sanakan.pl/i/example_new_style_1.png", "`typ` `bezpośredni link do obrazka (opcjonalne)`",
+                "konfiguracja profilu styl obrazek https://sanakan.pl/i/example_new_style_1.webp", "`typ` `bezpośredni link do obrazka (opcjonalne)`",
                 $"{ToPay(ProfileConfigType.Style, CurrencyType.SC)} / {ToPay(ProfileConfigType.Style, CurrencyType.TC)}",
                 $"**[1]** statystyki\n**[2]** obrazek *(wymagany link)*\n**[3]** obrazek na statystykach *(wymagany link)*\n**[4]** duża galeria\n**[5]** duża galeria na obrazku *(wymagany link)*\n**[6]** statystyki na obrazku *(wymagany link)*\n**[7]** galeria z karcianką\n**[8]** galeria z karcianką na obrazku *(wymagany link)*"),
 
             new OptionInfo("nakładka", "Pozwala ustawić obrazek będący prawie nad wszystkimi elementami w profilu zaczynający się od czarnego paska z nazwą użytkownika i idący do dołu profilu o wymiarach 750 x 402px.\n\n*Jeśli nakładka zasłoni nazwę użytkownika, to należy ją umieścić na nakładce w innym miejscu. W przeciwnym razie nakładka zostanie usunięta.*",
-                "konfiguracja profilu nakładka https://sanakan.pl/i/example_profile_overlay.png", "`bezpośredni link do obrazka`",
+                "konfiguracja profilu nakładka https://sanakan.pl/i/example_profile_overlay.webp", "`bezpośredni link do obrazka`",
                 $"{ToPay(ProfileConfigType.Overlay, CurrencyType.SC)} / {ToPay(ProfileConfigType.Overlay, CurrencyType.TC)}"),
 
             new OptionInfo("ramka awatara", "Pozwala zmienić wygląd ramki awatara.",
@@ -85,7 +86,7 @@ namespace Sanakan.Services.PocketWaifu
                 "konfiguracja profilu przeźroczystość cieni 30", "`procent`"),
 
             new OptionInfo("ultra nakładka", "Pozwala ustawić obrazek będący nad wszystkimi elementami w profilu poza paskiem o wymiarach 750 x 500px.\n\n*Jeśli nakładka zasłoni nazwę użytkownika, to należy ją umieścić na nakładce w innym miejscu. W przeciwnym razie nakładka zostanie usunięta.*",
-                "konfiguracja profilu ultra nakładka https://sanakan.pl/i/example_profile_ult_overlay.png", "`bezpośredni link do obrazka`",
+                "konfiguracja profilu ultra nakładka https://sanakan.pl/i/example_profile_ult_overlay.webp", "`bezpośredni link do obrazka`",
                 $"{ToPay(ProfileConfigType.PremiumOverlay, CurrencyType.SC)} / {ToPay(ProfileConfigType.PremiumOverlay, CurrencyType.TC)}"),
 
             new OptionInfo("pasek", "Pozwala zmienić pozycję paska profilu na górę lub dół."),
@@ -95,17 +96,26 @@ namespace Sanakan.Services.PocketWaifu
             new OptionInfo("karcianka", "Pozwala zmienić widoczność panelu statystyk karcianki, wymaga stylu wyświetlającego statystyki."),
             new OptionInfo("mini galeria", "Pozwala zmienić widoczność panelu mini galerii, wymaga stylu wyświetlającego statystyki oraz mini galerię."),
             new OptionInfo("ilość kart mini galerii", "Pozwala zmienić liczbę kart w mini galerii między 2 a 6, wymaga stylu wyświetlającego statystyki oraz mini galerię."),
-            new OptionInfo("zamiana paneli", "Pozwala zamienić między sobą prawy i lewy panel wymaga stylu wyświetlającego statystyki."),
-            new OptionInfo("ramka na poziom", "Pozwala aktywować ramkę awatara zależną od poziomu która działa wyłącznie z niektórymi ramkami."),
+            new OptionInfo("zamiana paneli", "Pozwala zamienić między sobą prawy i lewy panel, wymaga stylu wyświetlającego statystyki."),
+            new OptionInfo("ramka na poziom", "Pozwala aktywować ramkę awatara zależną od poziomu, która działa wyłącznie z niektórymi ramkami."),
             new OptionInfo("okrągły awatar", "Pozwala aktywować zaokrąglony awatar, gdy nie mamy ustawionej ramki."),
             new OptionInfo("przeźroczysty pasek", "Pozwala aktywować ustawiony stopień przeźroczystości cieni dla paska."),
             new OptionInfo("widoczność nakładki", "Pozwala zmienić widoczność nakładki."),
             new OptionInfo("widoczność ultra nakładki", "Pozwala zmienić widoczność ultra nakładki."),
+
+            new OptionInfo("kod", "Bez kodu wyświetla kod obecnych ustawień profilu: stylu, ramki awatara, przeźroczystości cieni i wszystkich przełączanych opcji, "
+                + "a z `obrazki` także z linkami do obecnych obrazków (działa przez 24 godziny). "
+                + "Z kodem ustawia je wszystkie naraz po potwierdzeniu. Płatne są zmieniane styl i ramka awatara oraz każdy obrazek z kodu. "
+                + "Do stylu wymagającego obrazka można dołączyć nowy obrazek o wymiarach 750 x 340px, jeśli kod go nie ma. Kody z obrazkami tworzy też Profilator na sanakan.pl.",
+                "konfiguracja profilu kod AQUOgAhG", "`kod lub obrazki (opcjonalne)` `bezpośredni link do obrazka stylu (opcjonalne)`",
+                "jak przy zmianie stylu, ramki awatara, tła i nakładek, tylko za zmieniane elementy i obrazki z kodu"),
         };
 
         public ProfileConfigType Type;
         public bool ToggleCurentValue;
         public string Url;
+        public string Code;
+        public bool WithImages;
         public int Value;
 
         public ProfileType Style;
@@ -113,18 +123,28 @@ namespace Sanakan.Services.PocketWaifu
         public ProfileSettings Settings;
         public CurrencyType Currency;
 
-        public bool NeedPay() => Type switch
+        // a new image is always paid, the same style or border set again is free
+        public bool NeedPay(User user) => Type switch
         {
-            ProfileConfigType.Style => true,
+            ProfileConfigType.Style => StyleNeedUrl() || user.ProfileType != Style,
             ProfileConfigType.Overlay => true,
             ProfileConfigType.Background => true,
             ProfileConfigType.PremiumOverlay => true,
             ProfileConfigType.BackgroundAndStyle => true,
-            ProfileConfigType.AvatarBorder => Border != AvatarBorder.None && Border != AvatarBorder.Base,
+            ProfileConfigType.AvatarBorder => IsPaidBorder(Border) && user.AvatarBorder != Border,
             _ => false
         };
 
-        private static CurrencyCost ToPay(ProfileConfigType type, CurrencyType currency) => type switch
+        public bool ChangesNothing(User user) => Type switch
+        {
+            ProfileConfigType.Style => !StyleNeedUrl() && user.ProfileType == Style,
+            ProfileConfigType.AvatarBorder => user.AvatarBorder == Border,
+            _ => false
+        };
+
+        public static bool IsPaidBorder(AvatarBorder border) => border != AvatarBorder.None && border != AvatarBorder.Base;
+
+        public static CurrencyCost ToPay(ProfileConfigType type, CurrencyType currency) => type switch
         {
             ProfileConfigType.Style => new CurrencyCost(currency == CurrencyType.SC ? 3000 : 1000, currency),
             ProfileConfigType.Overlay => new CurrencyCost(currency == CurrencyType.SC ? 4000 : 1800, currency),
@@ -137,7 +157,9 @@ namespace Sanakan.Services.PocketWaifu
 
         public CurrencyCost ToPay() => ToPay(Type, Currency);
 
-        public bool StyleNeedUrl() => Style switch
+        public bool StyleNeedUrl() => StyleNeedsImage(Style);
+
+        public static bool StyleNeedsImage(ProfileType style) => style switch
         {
             ProfileType.Stats       => false,
             ProfileType.Cards       => false,
@@ -192,7 +214,7 @@ namespace Sanakan.Services.PocketWaifu
         {
             ProfileConfigType.Style => "zmieniony został styl profilu.",
             ProfileConfigType.BackgroundAndStyle => "zmieniony został styl oraz tło profilu.",
-            ProfileConfigType.Background => "zmienione zostało tło profilu",
+            ProfileConfigType.Background => "zmienione zostało tło profilu.",
             ProfileConfigType.AvatarBorder => "zmieniona została ramka awatara.",
             ProfileConfigType.AnimeStats => "zmieniona została widoczność panelu ze statystykami anime.",
             ProfileConfigType.MangaStats => "zmieniona została widoczność panelu ze statystykami mang.",
@@ -210,6 +232,7 @@ namespace Sanakan.Services.PocketWaifu
             ProfileConfigType.CustomBarOpacity => "przełączono przeźroczystość pasków profilu.",
             ProfileConfigType.OverlayVisibility => "przełączono widoczność nakładki profilu.",
             ProfileConfigType.PremiumOverlayVisibility => "przełączono widoczność ultra nakładki profilu.",
+            ProfileConfigType.Code => "ustawiono profil z kodu.",
             _ => "????"
         };
     }

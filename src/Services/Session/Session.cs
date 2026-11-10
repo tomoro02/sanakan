@@ -3,7 +3,6 @@
 using Discord;
 using Discord.Commands;
 using Sanakan.Services.Executor;
-using Shinden.Logger;
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
@@ -138,7 +137,7 @@ namespace Sanakan.Services.Session
                     if (_logger != null)
                     {
                         string sessionName = Id ?? this.ToString();
-                        _logger.LogError($"In {sessionName} session: {ex}");
+                        _logger.LogError($"Session: {sessionName}: {ex}");
                     }
                     return false;
                 }

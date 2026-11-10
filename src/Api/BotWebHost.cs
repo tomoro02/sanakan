@@ -1,9 +1,9 @@
 #pragma warning disable 1591
 
 using Microsoft.AspNetCore.Hosting;
+using Microsoft.AspNetCore.Http;
 using System.Threading;
 using Microsoft.AspNetCore.Builder;
-using Microsoft.AspNetCore;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.AspNetCore.HttpOverrides;
 using System.IO;
@@ -11,19 +11,18 @@ using Microsoft.AspNetCore.Authentication;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.IdentityModel.Tokens;
+using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using System.Text;
+using System.Security.Cryptography;
 using Sanakan.Config;
-using Sanakan.Services.Executor;
-using Discord.WebSocket;
-using Shinden;
-using Sanakan.Services.PocketWaifu;
 using Newtonsoft.Json.Converters;
 using Newtonsoft.Json.Serialization;
 using Microsoft.OpenApi.Models;
-using Sanakan.Services.Time;
 using Asp.Versioning;
 using System;
+using System.Collections.Generic;
+using System.Linq;
 using System.Threading.Tasks;
 using Sanakan.Config.Model;
 
@@ -32,49 +31,82 @@ namespace Sanakan.Api
     public static class BotWebHost
     {
         private const int MinJwtKeyBytes = 32;
+        public const int MinAppKeyLength = 32;
 
-        private static IWebHost _host;
+#if DEBUG
+        public const string Url = "http://*:5005";
+#else
+        public const string Url = "http://localhost:5000";
+#endif
 
-        public static void RunWebHost(DiscordSocketClient client, ShindenClient shinden, Waifu waifu, IConfig config, Services.Helper helper,
-            IExecutor executor, Shinden.Logger.ILogger logger, ISystemTime time, TagHelper tags, Expedition expedition, HealthMonitor health)
+        private static IHost _host;
+
+        public static async Task StartAsync(IConfig config, IServiceCollection botServices, ILogger logger)
         {
-            var host = CreateWebHostBuilder(config).ConfigureServices(services =>
+            var host = CreateHost(config, botServices, Url);
+            try
             {
-                services.AddSingleton(tags);
-                services.AddSingleton(time);
-                services.AddSingleton(waifu);
-                services.AddSingleton(logger);
-                services.AddSingleton(client);
-                services.AddSingleton(helper);
-                services.AddSingleton(shinden);
-                services.AddSingleton(executor);
-                services.AddSingleton(expedition);
-                services.AddSingleton(health);
-            }).Build();
+                await host.StartAsync();
+            }
+            catch (Exception ex)
+            {
+                logger.LogError($"API: failed to start: {ex}");
+                Environment.Exit(1);
+            }
 
             _host = host;
-            new Thread(() =>
+        }
+
+        public static IHost CreateHost(IConfig config, IServiceCollection botServices, string url) =>
+            Host.CreateDefaultBuilder()
+            .ConfigureLogging(logging =>
             {
-                try
+                logging.ClearProviders();
+                logging.AddSimpleConsole(x => x.ColorBehavior = Microsoft.Extensions.Logging.Console.LoggerColorBehavior.Disabled);
+                logging.SetMinimumLevel(LogLevel.Warning);
+            })
+            .ConfigureWebHostDefaults(web => web
+                .ConfigureServices(services =>
                 {
-                    host.Run();
-                }
-                catch (Exception ex)
-                {
-                    logger.LogError($"API przestało działać: {ex}");
-                    Environment.Exit(1);
-                }
-            }) { IsBackground = true }.Start();
+                    AddApiServices(services, config);
+                    AddBotInstances(services, botServices);
+                    // the bot handles Ctrl+C and stops the API itself
+                    services.AddSingleton<IHostLifetime, BotLifetime>();
+                })
+                .Configure(UseApi)
+                .UseUrls(url))
+            .Build();
+
+        // only ready instances are shared; type registrations would create a second copy in the API container
+        public static void AddBotInstances(IServiceCollection services, IServiceCollection botServices)
+        {
+            foreach (var service in botServices.Where(x => x.ImplementationInstance != null))
+                services.Add(service);
+        }
+
+        private sealed class BotLifetime : IHostLifetime
+        {
+            public Task WaitForStartAsync(CancellationToken cancellationToken) => Task.CompletedTask;
+            public Task StopAsync(CancellationToken cancellationToken) => Task.CompletedTask;
         }
 
         public static void ValidateConfig(ConfigModel config)
         {
             if (config.Jwt == null || string.IsNullOrWhiteSpace(config.Jwt.Key) || Encoding.UTF8.GetByteCount(config.Jwt.Key) < MinJwtKeyBytes)
-                throw new InvalidOperationException($"Jwt.Key musi być ustawiony i mieć co najmniej {MinJwtKeyBytes} bajty");
+                throw new InvalidOperationException($"Jwt.Key must be set and be at least {MinJwtKeyBytes} bytes long");
 
             if (string.IsNullOrWhiteSpace(config.Jwt.Issuer))
-                throw new InvalidOperationException("Jwt.Issuer musi być ustawiony");
+                throw new InvalidOperationException("Jwt.Issuer must be set");
         }
+
+        public static List<string> WeakAppKeys(ConfigModel config)
+            => config.UserKeyApps?.Where(x => !string.IsNullOrEmpty(x?.Key) && x.Key.Length < MinAppKeyLength).Select(x => x.Bearer).ToList()
+                ?? new List<string>();
+
+        public static SymmetricSecurityKey SigningKey(IConfig config)
+            => new SymmetricSecurityKey(Encoding.UTF8.GetBytes(config.Get().Jwt.Key));
+
+        public static string GenerateJwtKey() => Convert.ToBase64String(RandomNumberGenerator.GetBytes(48));
 
         public static async Task StopAsync(TimeSpan timeout)
         {
@@ -88,27 +120,13 @@ namespace Sanakan.Api
             catch (OperationCanceledException) { }
         }
 
-        private static IWebHostBuilder CreateWebHostBuilder(IConfig config) =>
-            WebHost.CreateDefaultBuilder().ConfigureServices(services => AddApiServices(services, config))
-            .ConfigureLogging(logging =>
-            {
-                logging.ClearProviders();
-                logging.AddSimpleConsole(x => x.ColorBehavior = Microsoft.Extensions.Logging.Console.LoggerColorBehavior.Disabled);
-                logging.SetMinimumLevel(LogLevel.Warning);
-            })
-            .Configure(UseApi)
-#if !DEBUG
-            ;
-#else
-            .UseUrls("http://*:5005");
-#endif
-
         public static void AddApiServices(IServiceCollection services, IConfig config)
         {
             var tmpCnf = config.Get();
             services.AddMemoryCache();
             services.AddSingleton(config);
             services.AddSingleton<ITokenAttemptGuard, TokenAttemptGuard>();
+            services.AddSingleton<IPlayerBlacklist, DatabasePlayerBlacklist>();
             services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme).AddJwtBearer(opt =>
             {
                 opt.TokenValidationParameters = new TokenValidationParameters
@@ -119,8 +137,10 @@ namespace Sanakan.Api
                     ValidateIssuerSigningKey = true,
                     ValidIssuer = tmpCnf.Jwt.Issuer,
                     ValidAudience = tmpCnf.Jwt.Issuer,
-                    IssuerSigningKey = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(tmpCnf.Jwt.Key))
+                    // read on every request so the key can be rotated without a restart
+                    IssuerSigningKeyResolver = (token, securityToken, kid, parameters) => new[] { SigningKey(config) }
                 };
+                opt.Events = new JwtBearerEvents { OnTokenValidated = TokenChecks.OnTokenValidatedAsync };
             }).AddScheme<AuthenticationSchemeOptions, UserKeyAuthenticationHandler>(UserKeyAuthenticationHandler.SchemeName, null)
               .AddScheme<AuthenticationSchemeOptions, AppKeyAuthenticationHandler>(AppKeyAuthenticationHandler.SchemeName, null);
             services.AddAuthorization(op =>
@@ -178,7 +198,7 @@ namespace Sanakan.Api
                 {
                     Title = "Sanakan API",
                     Version = "1.0",
-                    Description = "Autentykacja następuje poprzez dopasowanie tokenu przesłanego w ciele zapytania `api/token`, a następnie wysyłania w nagłówku `Authorization` z przedrostkiem `Bearer` otrzymanego w zwrocie tokena."
+                    Description = "Autentykacja następuje poprzez dopasowanie klucza aplikacji z uprawnieniem `Site` przesłanego w ciele zapytania `api/token`, a następnie wysyłania w nagłówku `Authorization` z przedrostkiem `Bearer` otrzymanego w zwrocie tokena."
                         + "\n\nEndpointy wymagające użytkownika (`Player`) akceptują również klucz użytkownika przesłany w nagłówku `x-user-key`. Klucze generuje aplikacja z uprawnieniem `UserKeys` przez `api/userkey`, podając swój klucz w nagłówku `x-app-key`."
                         + "\n\nEndpointy z polityką `Info` (polecenia moderatorskie, uprawnienia użytkowników) akceptują poza tokenem strony również klucz aplikacji z uprawnieniem `Info` przesłany w nagłówku `x-app-key`. Klucz aplikacji z uprawnieniem `Site` daje dostęp do wszystkich endpointów strony (`Site` i `Info`)."
                         + "\n\nDocelowa wersja api powinna zostać przesłana pod nagłówkiem `x-api-version`, w przypadku jej niepodania zapytania są interpretowane jako wysłane do wersji `1.0`.",
@@ -201,18 +221,34 @@ namespace Sanakan.Api
             app.UseAuthentication();
             app.UseAuthorization();
 
-            var auditLogger = app.ApplicationServices.GetService<Shinden.Logger.ILogger>();
-            var traffic = new ApiTraffic(x => auditLogger?.Log(x), System.TimeSpan.FromHours(1));
+            var auditLogger = app.ApplicationServices.GetService<ILogger>();
+            var traffic = new ApiTraffic(x => auditLogger?.LogReport(x),System.TimeSpan.FromHours(1));
             app.Use(async (context, next) =>
             {
                 var watch = System.Diagnostics.Stopwatch.StartNew();
-                await next();
-                if (context.Request.Path.StartsWithSegments("/api/health") || context.Request.Path.StartsWithSegments("/api/alive")) return;
+                try
+                {
+                    await next();
+                }
+                catch (Exception ex)
+                {
+                    auditLogger?.LogError($"API: {context.Request.Method} {context.Request.Path} - {ex}");
+                    if (context.Response.HasStarted) throw;
 
-                ApiStats.Add(context);
-                var entry = ApiAudit.Describe(context, watch.ElapsedMilliseconds);
-                if (entry != null) auditLogger?.Log(entry);
-                else traffic.Add(context);
+                    context.Response.Clear();
+                    context.Response.StatusCode = StatusCodes.Status500InternalServerError;
+                    await context.Response.WriteAsJsonAsync(new { message = "Internal server error", success = false });
+                }
+                finally
+                {
+                    if (!context.Request.Path.StartsWithSegments("/api/health") && !context.Request.Path.StartsWithSegments("/api/alive"))
+                    {
+                        ApiStats.Add(context);
+                        var entry = ApiAudit.Describe(context, watch.ElapsedMilliseconds);
+                        if (entry != null) auditLogger?.Log(entry);
+                        else traffic.Add(context);
+                    }
+                }
             });
             app.UseEndpoints(endpoints =>
             {

@@ -13,7 +13,6 @@ using Discord.Commands;
 using Discord.WebSocket;
 using Sanakan.Config;
 using Sanakan.Extensions;
-using Shinden.Logger;
 
 namespace Sanakan.Services
 {
@@ -42,8 +41,10 @@ namespace Sanakan.Services
             return res.StatusCode;
         }
 
-        public string GivePublicHelp()
+        public string GivePublicHelp(string guildPrefix = null)
         {
+            var botPrefix = guildPrefix ?? _config.Get().Prefix;
+
             StringBuilder sb = new StringBuilder();
             sb.AppendLine("**Lista poleceń:**");
 
@@ -67,7 +68,7 @@ namespace Sanakan.Services
                 }
             }
 
-            sb.AppendLine($"\n\nUżyj `{_config.Get().Prefix}pomoc [polecenie]`, aby uzyskać informacje dotyczące danego polecenia.");
+            sb.AppendLine($"\n\nUżyj `{botPrefix}pomoc [polecenie]`, aby uzyskać informacje dotyczące danego polecenia.");
 
             return sb.ToString();
         }
@@ -78,7 +79,7 @@ namespace Sanakan.Services
             return $"**Lista poleceń:**\n\n**{moduleInfo.Prefix}:** " + string.Join("  ", moduleInfo.Commands);
         }
 
-        public string GiveHelpAboutPrivateCmd(string moduleName, string command, string prefix, bool throwEx = true)
+        public Embed GiveHelpAboutPrivateCmd(string moduleName, string command, string prefix, bool throwEx = true)
         {
             if (!PrivateModulesInfo.TryGetValue(moduleName, out var info))
             {
@@ -100,46 +101,33 @@ namespace Sanakan.Services
             return null;
         }
 
-        public string GetCommandInfo(CommandInfo cmd, string prefix = null)
+        public Embed GetCommandInfo(CommandInfo cmd, string prefix = null)
         {
-            string modulePrefix = GetModGroupPrefix(cmd.Module);
-            string botPrefix = prefix ?? _config.Get().Prefix;
+            var name = $"{prefix ?? _config.Get().Prefix}{GetModGroupPrefix(cmd.Module)}{cmd.Name}";
 
-            var commandBuilder = new StringBuilder($"**{botPrefix}{modulePrefix}{cmd.Name}**");
-
-            if (cmd.Parameters.Any())
+            var embed = new EmbedBuilder
             {
-                foreach (var param in cmd.Parameters.Where(param => !param.IsHidden()))
-                {
-                    commandBuilder.Append($" `{param.Name}` ");
-                }
-            }
+                Title = $"ℹ️ {name}".TrimToLength(EmbedBuilder.MaxTitleLength),
+                Color = Commands.CommandErrors.HelpColor,
+                Description = cmd.Summary,
+            };
 
-            commandBuilder.Append($" - {cmd.Summary}\n");
+            var arguments = Commands.CommandErrors.FormatArguments(cmd.Parameters.Where(x => !x.IsHidden())
+                .Select(x => (string.IsNullOrWhiteSpace(x.Summary) ? x.Name : x.Summary, x.IsOptional)));
+            if (arguments.Length > 0)
+                embed.AddField("Argumenty", arguments.TrimToLength(EmbedFieldBuilder.MaxFieldValueLength));
 
-            if (cmd.Parameters.Any())
-            {
-                foreach (var param in cmd.Parameters.Where(param => !param.IsHidden()))
-                {
-                    commandBuilder.Append($"*{param.Name}* - *{param.Summary}*\n");
-                }
-            }
+            var example = string.IsNullOrWhiteSpace(cmd.Remarks) ? name : $"{name} {cmd.Remarks}";
+            embed.AddField("Przykład", $"`{example}`".TrimToLength(EmbedFieldBuilder.MaxFieldValueLength));
 
-            if (cmd.Aliases.Count > 1)
-            {
-                commandBuilder.Append("\n**Aliasy:**\n");
-                foreach (var alias in cmd.Aliases.Where(alias => alias != cmd.Name))
-                {
-                    commandBuilder.Append($"`{alias}` ");
-                }
-            }
+            var aliases = cmd.Aliases.Where(x => x != cmd.Name).Select(x => $"`{x}`").ToList();
+            if (aliases.Count > 0)
+                embed.AddField("Aliasy", string.Join(" ", aliases).TrimToLength(EmbedFieldBuilder.MaxFieldValueLength));
 
-            commandBuilder.Append($"\n\nnp. `{botPrefix}{modulePrefix}{cmd.Name} {cmd.Remarks}`");
-
-            return commandBuilder.ToString();
+            return embed.Build();
         }
 
-        public string GiveHelpAboutPublicCmd(string command, string prefix, bool admin = false, bool dev = false)
+        public Embed GiveHelpAboutPublicCmd(string command, string prefix, bool admin = false, bool dev = false)
         {
             var matchingCommands = PublicModulesInfo
                 .SelectMany(module => module.Commands)
@@ -154,13 +142,13 @@ namespace Sanakan.Services
             if (admin)
             {
                 var res = GiveHelpAboutPrivateCmd("Moderacja", command, prefix, false);
-                if (!string.IsNullOrEmpty(res)) return res;
+                if (res != null) return res;
             }
 
             if (dev)
             {
                 var res = GiveHelpAboutPrivateCmd("Debug", command, prefix, false);
-                if (!string.IsNullOrEmpty(res)) return res;
+                if (res != null) return res;
             }
 
             throw new Exception("Polecenie nie istnieje!");
@@ -189,7 +177,7 @@ namespace Sanakan.Services
                 {
                     Prefix = GetModGroupPrefix(module, false),
                     Commands = module.Commands
-                        .Where(x => !string.IsNullOrEmpty(x.Name))
+                        .Where(x => !string.IsNullOrEmpty(x.Name) && !x.IsHidden())
                         .OrderBy(x => x.Name)
                         .Select(x => $"`{x.Name}`")
                         .ToList()
@@ -209,7 +197,7 @@ namespace Sanakan.Services
             {
                 Prefix = module.Name,
                 Commands = module.Commands
-                    .Where(cmd => !string.IsNullOrEmpty(cmd.Name))
+                    .Where(cmd => !string.IsNullOrEmpty(cmd.Name) && !cmd.IsHidden())
                     .OrderBy(x => x.Name)
                     .Select(cmd => $"`{cmd.Name}`")
                     .Distinct()
@@ -255,10 +243,11 @@ namespace Sanakan.Services
             string roles = "Brak";
             if (user.Roles.Count > 1)
             {
-                roles = string.Join("\n", user.Roles
+                // a field value holds at most 1024 characters, a longer one makes Discord reject the whole message
+                roles = Moderator.JoinWithinLimit(user.Roles
                     .OrderByDescending(x => x.Position)
                     .Where(x => !x.IsEveryone)
-                    .Select(x => x.Mention));
+                    .Select(x => x.Mention).ToList(), EmbedFieldBuilder.MaxFieldValueLength, " ");
             }
 
             return new List<EmbedFieldBuilder>
@@ -279,12 +268,6 @@ namespace Sanakan.Services
                 {
                     Name = "Pseudo",
                     Value = user.Nickname ?? "Brak",
-                    IsInline = true
-                },
-                new EmbedFieldBuilder
-                {
-                    Name = "Status",
-                    Value = user.Status.ToString(),
                     IsInline = true
                 },
                 new EmbedFieldBuilder
@@ -399,56 +382,10 @@ namespace Sanakan.Services
             return null;
         }
 
-        public Embed BuildRaportInfo(IMessage message, string reportAuthor, string reason, ulong reportId)
+        public void AppendMessage(List<Embed> embeds, MessageContent currentContent, string nextPart)
         {
-            var attachments = message.Attachments.Select(x => x.Url).ToList();
-            var attach = attachments.Count > 0 ? string.Join("\n", attachments) : "brak";
-
-            return new EmbedBuilder
-            {
-                Footer = new EmbedFooterBuilder().WithText($"Zgłasza: {reportAuthor}".TrimToLength(EmbedFooterBuilder.MaxFooterTextLength)),
-                Description = message.Content?.TrimToLength(2500) ?? "sam załącznik",
-                Author = new EmbedAuthorBuilder().WithUser(message.Author),
-                Color = EMType.Error.Color(),
-                Fields = new List<EmbedFieldBuilder>
-                {
-                    new EmbedFieldBuilder
-                    {
-                        IsInline = true,
-                        Name = "Kanał:",
-                        Value = message.Channel.Name,
-                    },
-                    new EmbedFieldBuilder
-                    {
-                        IsInline = true,
-                        Name = "Napisano:",
-                        Value = $"{message.GetLocalCreatedAtShortDateTime()}"
-                    },
-                    new EmbedFieldBuilder
-                    {
-                        IsInline = true,
-                        Name = "Id zgloszenia:",
-                        Value = reportId.ToString()
-                    },
-                    new EmbedFieldBuilder
-                    {
-                        IsInline = false,
-                        Name = "Powód:",
-                        Value = reason.TrimToLength(EmbedFieldBuilder.MaxFieldValueLength)
-                    },
-                    new EmbedFieldBuilder
-                    {
-                        IsInline = false,
-                        Name = "Załączniki:",
-                        Value = attach.TrimToLength(EmbedFieldBuilder.MaxFieldValueLength)
-                    }
-                }
-            }.Build();
-        }
-
-        public void AppendMessage(List<Embed> embeds, MessageContent currentContent, MessageEntry nextPart, int limitEntries = 27)
-        {
-            if (currentContent.Length + nextPart.Length > 3000 || (limitEntries > 0 && currentContent.Entries >= limitEntries))
+            if (currentContent.Length > 0 && (currentContent.Length + nextPart.Length > DiscordLimits.SafeDescriptionLength
+                || currentContent.Elements + DiscordLimits.CountElements(nextPart) > DiscordLimits.SafeMarkdownElements))
             {
                 embeds.Add(new EmbedBuilder() { Color = EMType.Info.Color(), Description = currentContent.ToString() }.Build());
                 currentContent.Clear();
@@ -462,7 +399,7 @@ namespace Sanakan.Services
             var contentString = new MessageContent();
             foreach (var row in rows)
             {
-                AppendMessage(list, contentString, new MessageEntry($"{row}\n", 20));
+                AppendMessage(list, contentString, $"{row}\n");
             }
 
             list.Add(new EmbedBuilder()
@@ -499,8 +436,23 @@ namespace Sanakan.Services
             }
             catch (Exception ex)
             {
-                return ExecutionResult.FromError($"coś poszło nie tak [{embeds.Count()}]:\n\n{ex.Message}".TrimToLength());
+                return DmFailed(ex, $"list of {embeds.Count()}");
             }
+        }
+
+        public const string DmClosed = "nie mogę wysłać Ci wiadomości prywatnej. Włącz wiadomości prywatne od członków tego serwera i spróbuj ponownie.";
+        public const string DmFailedText = "nie udało się wysłać wiadomości prywatnej. Spróbuj ponownie za chwilę.";
+
+        public static bool IsDmClosed(Exception ex)
+            => ex is Discord.Net.HttpException http && (int?)http.DiscordCode is 50007 or 50278;
+
+        private ExecutionResult DmFailed(Exception ex, string what)
+        {
+            if (IsDmClosed(ex))
+                return ExecutionResult.FromError(DmClosed);
+
+            _log?.LogError($"Helper: DM {what}: {ex}");
+            return ExecutionResult.FromError(DmFailedText);
         }
 
         public async Task<ExecutionResult> SendAsFileOnDMAsync(IUser user, IEnumerable<string> things)
@@ -516,7 +468,7 @@ namespace Sanakan.Services
             }
             catch (Exception ex)
             {
-                return ExecutionResult.FromError($"coś poszło nie tak:\n\n{ex.Message}".TrimToLength());
+                return DmFailed(ex, "file");
             }
         }
 

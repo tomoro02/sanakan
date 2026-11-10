@@ -19,8 +19,9 @@ namespace Sanakan.Extensions
     public static class UserExtension
     {
         public const int MAX_CARDS_IN_DECK = 8;
-        public const double MAX_DECK_POWER = 2500;
-        public const double MIN_DECK_POWER = 200;
+        // the four strongest maxed ultimate cards and a little room for more
+        public const double MAX_DECK_POWER = 300_000;
+        public const double MIN_DECK_POWER = 10;
 
         public static bool SendAnyMsgInMonth(this User u)
             => u.MessagesCnt > u.MessagesCntAtDate;
@@ -56,6 +57,7 @@ namespace Sanakan.Extensions
                 ExpCnt = 10,
                 Shinden = 0,
                 Warnings = 0,
+                LeftAt = null,
                 MessagesCnt = 0,
                 CommandsCnt = 0,
                 MessagesCntAtDate = 0,
@@ -80,6 +82,7 @@ namespace Sanakan.Extensions
                     Karma = 0,
                     PVPCoins = 0,
                     DeckPower = 0,
+                    CardsInDeck = 0,
                     PVPWinStreak = 0,
                     ItemsDropped = 0,
                     PremiumWaifu = 0,
@@ -144,6 +147,7 @@ namespace Sanakan.Extensions
                     LotteryTicketsUsed = 0,
                     WastedPuzzlesOnCards = 0,
                     WastedActivityOnCards = 0,
+                    CreatedCardsFromItems = 0,
                     WastedPuzzlesOnCookies = 0,
                     WastedActivityOnCookies = 0,
                     WastedPuzzlesOnCardsReal = 0,
@@ -208,7 +212,7 @@ namespace Sanakan.Extensions
             var f = deck.MaxNumberOfCards % 1000;
             var b = deck.MaxNumberOfCards / 1000;
             var maxOldPriceCnt = 10 - (f / 100);
-            var bExp = (b - 1) * 0.2;
+            var bExp = (b - 1) * 0.2m;
             var oldPriceCnt = count;
 
             if (count >= maxOldPriceCnt)
@@ -222,14 +226,14 @@ namespace Sanakan.Extensions
             var rmCnt = count / 10;
             for (var i = 1; i < rmCnt + 1; i++)
             {
-                bExp = (++b - 1) * 0.2;
+                bExp = (++b - 1) * 0.2m;
                 price += (long)((10 * basePrice) * ((b + bExp) * b));
             }
 
             if (count > 0)
             {
-                bExp = (++b - 1) * 0.2;
-                price += (long)(((count - (rmCnt * 10)) * basePrice) * ((b + rmCnt + bExp) * b));
+                bExp = (++b - 1) * 0.2m;
+                price += (long)(((count - (rmCnt * 10)) * basePrice) * ((b + bExp) * b));
             }
 
             return price;
@@ -243,11 +247,18 @@ namespace Sanakan.Extensions
         public static bool CanIncGalleryLimit(this GameDeck deck, uint count)
             => count > 0 && deck.CardsInGallery + (long)GallerySlotsPerPurchase * count <= int.MaxValue;
 
+        // the global rank grows over years
         private const double PVPRankMultiplier = 0.45;
+        // a season lasts a month, so the top rank (Konsul) starts at about 15000 points
+        private static readonly double SeasonalPVPRankMultiplier = 170 / Math.Sqrt(15000);
 
-        public static string GetRankName(this GameDeck deck, long? rank = null)
+        public static string GetRankName(this GameDeck deck) => GetRankName(deck.SeasonalPVPRank, SeasonalPVPRankMultiplier);
+
+        public static string GetGlobalRankName(this GameDeck deck) => GetRankName(deck.GlobalPVPRank, PVPRankMultiplier);
+
+        private static string GetRankName(long points, double multiplier)
         {
-            switch ((ExperienceManager.CalculateLevel(rank ?? deck.SeasonalPVPRank, PVPRankMultiplier) / 10))
+            switch ((ExperienceManager.CalculateLevel(points, multiplier) / 10))
             {
                 case var n when (n >= 17):
                     return "Konsul";
@@ -311,13 +322,53 @@ namespace Sanakan.Extensions
             return d1MMR >= mDown && d1MMR <= mUp;
         }
 
-        public static long GetPVPCoinsFromDuel(this GameDeck deck, FightResult res)
-        {
-            var step = ExperienceManager.CalculateLevel(deck.SeasonalPVPRank, PVPRankMultiplier) / 10;
-            if (step > 5) step = 5;
+        public static bool IsNearPower(this GameDeck candidate, GameDeck player, double factor)
+            => candidate.DeckPower >= player.DeckPower / factor && candidate.DeckPower <= player.DeckPower * factor;
 
-            var coinCnt = 40 + (20 * step);
-            return (res == FightResult.Win) ? coinCnt : coinCnt / 2;
+        // a 25% stronger deck already wins about 70% of duels, so the power range widens only when there are too few opponents
+        private static readonly double[] _powerRanges = { 1.25, 1.5, 2, 3, 5 };
+
+        public static List<GameDeck> GetPvpOpponentCandidates(this GameDeck player, IReadOnlyCollection<GameDeck> pool, int wanted = 10)
+        {
+            // without anyone in range the closest decks are taken, so a far stronger deck does not get the whole pool to farm
+            var byPower = pool.OrderBy(x => Math.Abs(Math.Log(Math.Max(x.DeckPower, 1) / Math.Max(player.DeckPower, 1)))).Take(wanted).ToList();
+            foreach (var range in _powerRanges)
+            {
+                var near = pool.Where(x => x.IsNearPower(player, range)).ToList();
+                if (near.Count >= wanted)
+                {
+                    byPower = near;
+                    break;
+                }
+            }
+
+            if (byPower.Count < wanted)
+                return byPower;
+
+            double toLong = 1;
+            var inRange = byPower.Where(x => x.IsNearMMR(player)).ToList();
+            for (double mmr = 0.5; inRange.Count < wanted; mmr += (0.5 * toLong))
+            {
+                inRange = byPower.Where(x => x.IsNearMMR(player, mmr)).ToList();
+                toLong += 0.5;
+            }
+
+            return inRange;
+        }
+
+        public const int MinPvpCoinsForWin = 60;
+        public const int MaxPvpCoinsForWin = 140;
+        // fitted on simulated duels: a deck 25% stronger wins about 70% of them
+        private const double PvpPowerSlope = 3.8;
+
+        public static double GetPvpWinChance(this GameDeck deck, GameDeck enemy)
+            => 1 / (1 + Math.Pow(Math.Max(enemy.DeckPower, 1) / Math.Max(deck.DeckPower, 1), PvpPowerSlope));
+
+        // beating a stronger deck pays more, a draw or a loss gives half of what the win would have
+        public static long GetPVPCoinsFromDuel(this GameDeck deck, GameDeck enemy, FightResult res)
+        {
+            var win = MinPvpCoinsForWin + (MaxPvpCoinsForWin - MinPvpCoinsForWin) * (1 - deck.GetPvpWinChance(enemy));
+            return (long)Math.Round(res == FightResult.Win ? win : win / 2);
         }
 
         public static string CalculatePVPParams(this GameDeck d1, GameDeck d2, FightResult res)
@@ -380,8 +431,9 @@ namespace Sanakan.Extensions
 
             d1.GlobalPVPRank += gRank;
             d1.SeasonalPVPRank += sRank;
-            d2.GlobalPVPRank -= gRank;
-            d2.SeasonalPVPRank -= sRank;
+            // the opponent did not choose this duel, so its rank moves only half as much
+            d2.GlobalPVPRank -= gRank / 2;
+            d2.SeasonalPVPRank -= sRank / 2;
 
             if (d1.GlobalPVPRank < 0)
                 d1.GlobalPVPRank = 0;
@@ -395,7 +447,7 @@ namespace Sanakan.Extensions
             if (d2.SeasonalPVPRank < 0)
                 d2.SeasonalPVPRank = 0;
 
-            var coins = d1.GetPVPCoinsFromDuel(res);
+            var coins = d1.GetPVPCoinsFromDuel(d2, res);
             d1.PVPCoins += coins;
 
             return $"**{coins:+0;-#}** PC **{gRank:+0;-#}** GR  **{sRank:+0;-#}** SR";
@@ -492,12 +544,21 @@ namespace Sanakan.Extensions
             return false;
         }
 
+        public static string GetAlterProfileUrl(this User user) => $"https://alter.sanakan.pl/user/{user.Shinden}/profile";
+
         public static double GetDeckPower(this GameDeck deck) => deck.DeckPower;
 
         public static bool NeedToSetDeckAgain(this GameDeck deck) => deck.DeckPower == -1;
 
         public static double CalculateDeckPower(this GameDeck deck)
-            => deck.Cards.Where(x => x.Active).Sum(x => x.CalculateCardPower());
+            => CombineCardPowers(deck.Cards.Where(x => x.Active).Select(x => x.CalculateCardPower()));
+
+        // in simulated deck fights a few strong cards beat more weaker ones of the same total power,
+        // raising the powers to this exponent before adding them up evens that out
+        public const double DeckPowerExponent = 1.025;
+
+        public static double CombineCardPowers(IEnumerable<double> powers)
+            => Math.Pow(powers.Sum(x => Math.Pow(x, DeckPowerExponent)), 1 / DeckPowerExponent);
 
         /// <summary>
         /// Przelicza zapisane w bazie pola talii (moc i liczba aktywnych kart) na podstawie kolekcji kart.
@@ -518,10 +579,10 @@ namespace Sanakan.Extensions
             var cnt = ultimateCards.Count;
             if (cnt > 5) cnt = 5;
 
-            cnt += ultimateCards.Any(x => x.Quality > Quality.Alpha) ? 1 : 0;
-            cnt += ultimateCards.Any(x => x.Quality > Quality.Gamma) ? 2 : 0;
-            cnt += ultimateCards.Any(x => x.Quality > Quality.Zeta) ? 3 : 0;
-            cnt += ultimateCards.Any(x => x.Quality > Quality.Lambda) ? 5 : 0;
+            cnt += ultimateCards.Any(x => x.GetEffectiveQuality() > Quality.Alpha) ? 1 : 0;
+            cnt += ultimateCards.Any(x => x.GetEffectiveQuality() > Quality.Gamma) ? 2 : 0;
+            cnt += ultimateCards.Any(x => x.GetEffectiveQuality() > Quality.Zeta) ? 3 : 0;
+            cnt += ultimateCards.Any(x => x.GetEffectiveQuality() > Quality.Lambda) ? 5 : 0;
             if (cnt > 12) cnt = 12;
 
             return cnt;
@@ -587,6 +648,39 @@ namespace Sanakan.Extensions
         public static IEnumerable<Card> GetOrderedGalleryCards(this GameDeck deck, ulong galleryTagId)
             => deck.GetOrderedGalleryCardsUnlimited(galleryTagId).Take(deck.CardsInGallery);
 
+        // the cards the profile shows in its gallery, in the order the player set
+        public static IEnumerable<Card> GetProfileGalleryCards(this User user, ulong galleryTagId, int count)
+        {
+            if (user.Id == 1)
+                return user.GameDeck.Cards.OrderBy(x => x.Rarity).Take(count);
+
+            if (string.IsNullOrEmpty(user.GameDeck.GalleryOrderedIds))
+            {
+                return user.GameDeck.GetOrderedGalleryCards(galleryTagId).Take(count);
+            }
+
+            var ids = user.GameDeck.GalleryOrderedIds.Split(" ")
+                .Select(x => Api.Models.UserSiteProfile.TryParseIds(x)).Distinct();
+
+            var cards = new List<Card>();
+            var cardsInGallery = user.GameDeck.GetOrderedGalleryCards(galleryTagId).ToList();
+            foreach (var id in ids)
+            {
+                if (id == 0)
+                    continue;
+
+                var card = cardsInGallery.FirstOrDefault(x => x.Id == id);
+                if (card != null)
+                {
+                    cards.Add(card);
+                    cardsInGallery.Remove(card);
+                }
+            }
+
+            cards.AddRange(cardsInGallery);
+            return cards.Take(count);
+        }
+
         public static bool IsSupaBad(this GameDeck deck) => deck.Karma <= -5000;
         public static bool CanCreateDemon(this GameDeck deck) => deck.Karma <= -2000;
 
@@ -640,7 +734,8 @@ namespace Sanakan.Extensions
             {
                 if (en.Entry == WishlistEntryType.Normal)
                 {
-                    db.CreateOrChangeWishlistCountBy(en.ObjectId, en.ObjectName, -1, -1);
+                    if (!deck.WishlistIsPrivate)
+                        db.CreateOrChangeWishlistCountBy(en.ObjectId, en.ObjectName, -1, -1);
                     deck.Wishes.Remove(en);
                 }
                 return true;
@@ -655,7 +750,8 @@ namespace Sanakan.Extensions
             {
                 if (en.Entry == WishlistEntryType.Normal)
                 {
-                    await db.WishlistCountData.CreateOrChangeWishlistCountByAsync(en.ObjectId, en.ObjectName, -1, -1);
+                    if (!deck.WishlistIsPrivate)
+                        await db.WishlistCountData.CreateOrChangeWishlistCountByAsync(en.ObjectId, en.ObjectName, -1, -1);
                     deck.Wishes.Remove(en);
                 }
                 return true;
@@ -691,13 +787,13 @@ namespace Sanakan.Extensions
 
         public static EmbedBuilder GetStatsView(this User u, IUser user)
         {
-            string stats = $"**Wiadomości**: {u.MessagesCnt}\n**Polecenia:** {u.CommandsCnt}";
-
             return new EmbedBuilder
             {
                 Color = EMType.Info.Color(),
-                Description = $"**Statystyki** {user.Mention}:\n\n{stats}\n{u.Stats.ToView()}".TrimToLength()
-            };
+                Title = $"Statystyki · {user.GetUserNickInGuild()}".TrimToLength(EmbedBuilder.MaxTitleLength),
+            }
+            .AddField("Aktywność", $"{u.MessagesCnt} wiadomości\n{u.CommandsCnt} poleceń", true)
+            .AddStatsFields(u.Stats);
         }
 
         public static long GetRemainingExp(this User u)
@@ -764,13 +860,16 @@ namespace Sanakan.Extensions
         }
 
         public static string GetCardCountStats(this GameDeck deck)
+            => FormatCardCountStats(deck.Cards.GroupBy(x => x.Rarity).ToDictionary(x => x.Key, x => x.Count()));
+
+        public static string FormatCardCountStats(IReadOnlyDictionary<Rarity, int> counts)
         {
             string stats = "";
 
             foreach (Rarity rarity in (Rarity[])Enum.GetValues(typeof(Rarity)))
             {
-                var count = deck.Cards.Count(x => x.Rarity == rarity);
-                if (count > 0) stats += $"**{rarity.ToString().ToUpper()}**: {count} ";
+                if (counts.TryGetValue(rarity, out var count) && count > 0)
+                    stats += $"**{rarity.ToString().ToUpper()}**: {count} ";
             }
 
             return stats;
@@ -807,7 +906,7 @@ namespace Sanakan.Extensions
             }
         }
 
-        public static void StoreExpIfPossible(this User user, double exp)
+        public static double StoreExpIfPossible(this User user, double exp)
         {
             var maxToTransfer = user.GameDeck.ExpContainer.GetMaxExpTransferToChest();
             if (maxToTransfer != -1)
@@ -818,6 +917,7 @@ namespace Sanakan.Extensions
                 if (exp < 0) exp = 0;
             }
             user.GameDeck.ExpContainer.ExpCount += exp;
+            return exp;
         }
 
         public static Card GetCard(this User user, ulong id) => user.GameDeck.Cards.FirstOrDefault(x => x.Id == id);

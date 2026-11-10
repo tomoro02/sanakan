@@ -6,8 +6,7 @@ using System.Linq;
 using System.Threading.Tasks;
 using Sanakan.Database.Models;
 using Sanakan.Extensions;
-using Sanakan.Services.Time;
-using Shinden;
+using Sanakan.Services.Cache;
 
 namespace Sanakan.Services.PocketWaifu
 {
@@ -25,7 +24,6 @@ namespace Sanakan.Services.PocketWaifu
 
     public class Lottery
     {
-        private static CharacterPool<ulong> _currentSeason = new CharacterPool<ulong>();
 
         private static List<Quality> _figurePartsQuality = new List<(Quality, int)>
         {
@@ -110,6 +108,16 @@ namespace Sanakan.Services.PocketWaifu
             (300,   1),
         }.ToRealList();
 
+        // TC is the premium currency, so it comes in much smaller amounts than CT
+        private static List<int> _tcRewards = new List<(int, int)>
+        {
+            (5,     60),
+            (10,    40),
+            (15,    10),
+            (20,    5),
+            (30,    1),
+        }.ToRealList();
+
         public struct LotteryRewardInfo
         {
             public string Text;
@@ -118,13 +126,21 @@ namespace Sanakan.Services.PocketWaifu
             public int Count;
         };
 
-        private ShindenClient _shClient;
-        private ISystemTime _time;
+        private Shinden _shinden;
 
-        public Lottery(ShindenClient client, ISystemTime time)
+        public Lottery(Shinden shinden)
         {
-            _shClient = client;
-            _time = time;
+            _shinden = shinden;
+        }
+
+        // the experience goes to the chest, which may be disabled or almost full
+        public static string ExpRewardText(int won, int stored)
+        {
+            if (stored <= 0)
+                return $"{Polish.Count(won, "punkt", "punkty", "punktów")} doświadczenia, ale skrzynia jest nieaktywna lub pełna i przepadły!";
+
+            var text = $"{Polish.Count(stored, "punkt", "punkty", "punktów")} doświadczenia do skrzyni";
+            return stored < won ? $"{text} (z {won}, skrzynia jest pełna)!" : $"{text}!";
         }
 
         public static List<LotteryRewardInfo> Simplify(List<LotteryRewardInfo> rewards)
@@ -141,33 +157,22 @@ namespace Sanakan.Services.PocketWaifu
             return newRewards;
         }
 
+        public static int RollCount(int min, int max) => Fun.GetRandomValueInclusive(min, max);
+
+        // about a quarter of what a hardcore expedition drops, so the lottery adds to it without replacing it
+        public const int MinPills = 5;
+        public const int MaxPills = 15;
+
+        public static int MaxFigureParts(Quality quality) => quality > Quality.Jota ? 2 : quality > Quality.Delta ? 5 : 10;
+
         public static List<(Quality, float)> GetPartQualityChances() => _figurePartsQuality.GetChances();
         public static List<(ItemType, float)> GetPartNSChances() => _figurePartsNoSkeleton.GetChances();
         public static List<(LotteryReward, float)> GetRewardChances() => _rewardsPool.GetChances();
         public static List<(int, float)> GetMoneyRewardChances() => _moneyRewards.GetChances();
+        public static List<(int, float)> GetTcRewardChances() => _tcRewards.GetChances();
         public static List<(ItemType, float)> GetPartChances() => _figureParts.GetChances();
         public static List<(ItemType, float)> GetPillsChances() => _pills.GetChances();
         public static List<(ItemType, float)> GetFoodChances() => _food.GetChances();
-
-        public async Task<ulong> GetRandomTitleAsync()
-        {
-            if (_currentSeason.IsNeedForUpdate(_time.Now()))
-            {
-                try
-                {
-                    var res = await _shClient.Ex.GetAnimeFromSeasonAsync();
-                    if (!res.IsSuccessStatusCode()) return 0;
-
-                    _currentSeason.Update(res.Body, _time.Now());
-                }
-                catch (Exception)
-                {
-                    return 0;
-                }
-            }
-
-            return _currentSeason.GetOneRandom();
-        }
 
         public async Task<LotteryRewardInfo> GetAndApplyRewardAsync(User user)
         {
@@ -180,22 +185,22 @@ namespace Sanakan.Services.PocketWaifu
                 case LotteryReward.CardsFromSeason:
                 {
                     string addInfo = "";
-                    ulong randomTitle = 0;
+                    SeasonSnapshot season = null;
                     if (reward == LotteryReward.CardsFromSeason)
                     {
-                        randomTitle = await GetRandomTitleAsync();
-                        if (randomTitle == 0)
+                        season = await _shinden.GetCurrentSeasonAsync();
+                        if (season == null || season.Characters.Count == 0)
                         {
                             reward = LotteryReward.CardsBig;
                             rewardInfo.Type = LotteryReward.CardsBig;
-                            addInfo = $"\n\nPowinien być sezonowy, ale wpadła 500 od shindena";
+                            addInfo = $"\n\nMiał być sezonowy, ale nie udało się pobrać sezonu z Shindena, więc wpadł zwykły pakiet";
                         }
                     }
 
                     var isBig = Fun.TakeATry(35d);
                     var name = reward switch
                     {
-                        LotteryReward.CardsFromSeason => "Sezonowy",
+                        LotteryReward.CardsFromSeason => $"Sezon: {season.Name()}",
                         LotteryReward.CardsBig => isBig ? "Duży" : "Średni",
                         _ => isBig ? "Normalny" : "Mały"
                     };
@@ -210,7 +215,7 @@ namespace Sanakan.Services.PocketWaifu
                     var pack = new BoosterPack
                     {
                         CardCnt = cnt,
-                        Title = reward == LotteryReward.CardsFromSeason ? randomTitle : 0,
+                        Season = reward == LotteryReward.CardsFromSeason ? season.Key : null,
                         RarityExcludedFromPack = new List<RarityExcluded>(),
                         Characters = new List<BoosterPackCharacter>(),
                         Name = $"Pakiet kart z loterii ({name})",
@@ -238,7 +243,7 @@ namespace Sanakan.Services.PocketWaifu
 
                 case LotteryReward.TC:
                 {
-                    var tcCnt = Fun.GetOneRandomFrom(_moneyRewards);
+                    var tcCnt = Fun.GetOneRandomFrom(_tcRewards);
                     user.TcCnt += tcCnt;
 
                     rewardInfo.Count = tcCnt;
@@ -249,7 +254,7 @@ namespace Sanakan.Services.PocketWaifu
 
                 case LotteryReward.WaifuFood:
                 {
-                    var cnt = Fun.GetRandomValue(5, 20);
+                    var cnt = RollCount(5, 20);
                     var food = Fun.GetOneRandomFrom(_food).ToItem(cnt);
                     user.GameDeck.AddItem(food);
 
@@ -262,23 +267,20 @@ namespace Sanakan.Services.PocketWaifu
                 case LotteryReward.ExpForChest:
                 {
                     var exp = Fun.GetOneRandomFrom(_moneyRewards);
-                    user.StoreExpIfPossible(exp);
+                    var stored = (int)user.StoreExpIfPossible(exp);
 
-                    rewardInfo.Count = exp;
-                    rewardInfo.Text = $"{exp} punktów doświadczenia!";
-                    rewardInfo.SubType = $"Punkty doświadczenia";
+                    rewardInfo.Count = stored;
+                    rewardInfo.Text = ExpRewardText(exp, stored);
+                    rewardInfo.SubType = "Punkty doświadczenia do skrzyni";
                     break;
                 }
 
                 case LotteryReward.FigurePart:
                 {
-                    var max = 10;
                     var pool = _figureParts;
                     var quality = Fun.GetOneRandomFrom(_figurePartsQuality);
-                    if (quality > Quality.Jota) max = 2;
-                    else if (quality > Quality.Delta) max = 5;
                     if (quality > Quality.Lambda) pool = _figurePartsNoSkeleton;
-                    var cnt = Fun.GetRandomValue(1, max);
+                    var cnt = RollCount(1, MaxFigureParts(quality));
                     var part = Fun.GetOneRandomFrom(pool).ToItem(cnt, quality);
                     user.GameDeck.AddItem(part);
 
@@ -290,7 +292,7 @@ namespace Sanakan.Services.PocketWaifu
 
                 case LotteryReward.RandomPill:
                 {
-                    var cnt = Fun.GetRandomValue(1, 5);
+                    var cnt = RollCount(MinPills, MaxPills);
                     var pill = Fun.GetOneRandomFrom(_pills).ToItem(cnt);
                     user.GameDeck.AddItem(pill);
 
@@ -340,7 +342,7 @@ namespace Sanakan.Services.PocketWaifu
                         }
                     }
 
-                    rewardInfo.Text = "odwrócenie karmy!";
+                    rewardInfo.Text = "Odwrócenie karmy!";
                     rewardInfo.SubType = "Odwrócenie karmy";
                     break;
                 }

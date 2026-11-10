@@ -5,16 +5,13 @@ using Discord.Commands;
 using Discord.WebSocket;
 using Sanakan.Config;
 using Sanakan.Database.Models;
-using Sanakan.Database.Models.Analytics;
 using Sanakan.Extensions;
 using Sanakan.Services.Executor;
 using Sanakan.Services.PocketWaifu;
 using Sanakan.Services.Time;
-using Shinden.Logger;
 using System;
 using System.Linq;
 using System.Reflection;
-using System.Threading;
 using System.Threading.Tasks;
 
 namespace Sanakan.Services.Commands
@@ -29,7 +26,6 @@ namespace Sanakan.Services.Commands
         private ILogger _logger;
         private IConfig _config;
         private Helper _helper;
-        private Timer _timer;
 
         public CommandHandler(DiscordSocketClient client, IConfig config, ILogger logger,
             IExecutor executor, ISystemTime time)
@@ -40,40 +36,33 @@ namespace Sanakan.Services.Commands
             _logger = logger;
             _executor = executor;
             _cmd = new CommandService();
-            _cmd.CommandExecuted += (cmd, _, result) =>
+            _cmd.CommandExecuted += (cmd, context, result) =>
             {
                 if (cmd.IsSpecified)
+                {
                     MinuteStats.Commands.Add(result.Error is CommandError.Exception or CommandError.Unsuccessful);
+                    CommandLog.Finished(_logger, cmd.Value.Name, context, result);
+                }
                 return Task.CompletedTask;
             };
+        }
 
-            _timer = new Timer(async _ =>
-            {
-                try
-                {
-                    using (var proc = System.Diagnostics.Process.GetCurrentProcess())
-                    {
-                        _logger.Log($"mem usage: {proc.WorkingSet64 / 1048576} MiB");
-                        using (var dba = new Database.DatabaseContext(_config))
-                        {
-                            dba.SystemData.Add(new SystemAnalytics
-                            {
-                                MeasureDate = _time.Now(),
-                                Value = proc.WorkingSet64 / 1048576,
-                                Type = SystemAnalyticsEventType.Ram,
-                            });
-                            await dba.SaveChangesAsync();
-                        }
-                    }
-                }
-                catch (Exception ex)
-                {
-                    _logger.LogError($"in mem check: {ex}");
-                }
-            },
-            null,
-            TimeSpan.FromMinutes(1),
-            TimeSpan.FromMinutes(5));
+        public static void AddTypeReaders(CommandService commands)
+        {
+            commands.AddTypeReader<ActionAfterExpedition>(new TypeReaders.ActionAfterExpedtionTypeReader());
+            commands.AddTypeReader<SlotMachineSetting>(new TypeReaders.SlotMachineSettingTypeReader());
+            commands.AddTypeReader<ModifyTagActionType>(new TypeReaders.ModifyTagActionTypeReader());
+            commands.AddTypeReader<WishlistObjectType>(new TypeReaders.WishlistObjectTypeReader());
+            commands.AddTypeReader<ProfileConfig>(new TypeReaders.ProfileConfigTypeReader());
+            commands.AddTypeReader<ItemCountPair>(new TypeReaders.ItemCountPairTypeReader());
+            commands.AddTypeReader<CardExpedition>(new TypeReaders.ExpeditionTypeReader());
+            commands.AddTypeReader<FigurePart>(new TypeReaders.FigurePartTypeReader());
+            commands.AddTypeReader<ConfigType>(new TypeReaders.ConfigTypeReader());
+            commands.AddTypeReader<CoinSide>(new TypeReaders.CoinSideTypeReader());
+            commands.AddTypeReader<HaremType>(new TypeReaders.HaremTypeReader());
+            commands.AddTypeReader<ItemType>(new TypeReaders.ItemTypeReader());
+            commands.AddTypeReader<TopType>(new TypeReaders.TopTypeReader());
+            commands.AddTypeReader<bool>(new TypeReaders.BoolTypeReader());
         }
 
         public async Task InitializeAsync(IServiceProvider provider, Helper helper)
@@ -81,20 +70,7 @@ namespace Sanakan.Services.Commands
             _helper = helper;
             _provider = provider;
 
-            _cmd.AddTypeReader<ActionAfterExpedition>(new TypeReaders.ActionAfterExpedtionTypeReader());
-            _cmd.AddTypeReader<SlotMachineSetting>(new TypeReaders.SlotMachineSettingTypeReader());
-            _cmd.AddTypeReader<ModifyTagActionType>(new TypeReaders.ModifyTagActionTypeReader());
-            _cmd.AddTypeReader<WishlistObjectType>(new TypeReaders.WishlistObjectTypeReader());
-            _cmd.AddTypeReader<ProfileConfig>(new TypeReaders.ProfileConfigTypeReader());
-            _cmd.AddTypeReader<ItemCountPair>(new TypeReaders.ItemCountPairTypeReader());
-            _cmd.AddTypeReader<CardExpedition>(new TypeReaders.ExpeditionTypeReader());
-            _cmd.AddTypeReader<FigurePart>(new TypeReaders.FigurePartTypeReader());
-            _cmd.AddTypeReader<ConfigType>(new TypeReaders.ConfigTypeReader());
-            _cmd.AddTypeReader<CoinSide>(new TypeReaders.CoinSideTypeReader());
-            _cmd.AddTypeReader<HaremType>(new TypeReaders.HaremTypeReader());
-            _cmd.AddTypeReader<ItemType>(new TypeReaders.ItemTypeReader());
-            _cmd.AddTypeReader<TopType>(new TypeReaders.TopTypeReader());
-            _cmd.AddTypeReader<bool>(new TypeReaders.BoolTypeReader());
+            AddTypeReaders(_cmd);
 
             _helper.PublicModulesInfo = await _cmd.AddModulesAsync(Assembly.GetEntryAssembly(), _provider);
 
@@ -133,7 +109,7 @@ namespace Sanakan.Services.Commands
                 var res = await _cmd.GetExecutableCommandAsync(context, argPos, _provider);
                 if (res.IsSuccess())
                 {
-                    _logger.Log($"Run cmd: u{msg.Author.Id} {res.Command.Match.Command.Name}");
+                    CommandLog.Started(context);
 
                     switch (res.Command.Match.Command.RunMode)
                     {
@@ -146,7 +122,8 @@ namespace Sanakan.Services.Commands
                             if (!await _executor.TryAdd(res.Command, TimeSpan.FromSeconds(1)))
                             {
                                 MinuteStats.RejectedCommands.Add(false);
-                                await context.Channel.SendMessageAsync("", embed: "Odrzucono polecenie!".ToEmbedMessage(EMType.Error).Build());
+                                await context.Channel.SendMessageAsync("", embed: string.Format(CommandErrors.Busy, context.User.Mention)
+                                    .ToEmbedMessage().WithColor(CommandErrors.BusyColor).Build());
                             }
                             break;
                     }
@@ -169,13 +146,17 @@ namespace Sanakan.Services.Commands
                     break;
 
                 case CommandError.ParseFailed:
-                    await context.Channel.SendMessageAsync("", embed: $"{context.User.Mention} {result.ErrorReason}".ToEmbedMessage(EMType.Error).Build());
+                case CommandError.ObjectNotFound:
+                    var parameter = result is ParseResult parse ? parse.ErrorParameter : null;
+                    var reason = CommandErrors.Translate(result.ErrorReason, parameter?.Type, parameter?.Summary);
+                    await context.Channel.SendMessageAsync("", embed: $"{context.User.Mention} {reason}".ToEmbedMessage()
+                        .WithColor(CommandErrors.ErrorColor).Build());
                     break;
                 case CommandError.BadArgCount:
                     var cmd = _cmd.Search(context, argPos);
                     if (cmd.Commands.Count > 0)
                     {
-                        await context.Channel.SendMessageAsync(_helper.GetCommandInfo(cmd.Commands.First().Command, prefix));
+                        await context.Channel.SendMessageAsync("", embed: _helper.GetCommandInfo(cmd.Commands.First().Command, prefix));
                     }
                     break;
 
@@ -193,7 +174,7 @@ namespace Sanakan.Services.Commands
                     break;
 
                 default:
-                    _logger.Log(result.ErrorReason);
+                    _logger.Log($"Cmd: {result.Error}: {result.ErrorReason}");
                     break;
             }
         }

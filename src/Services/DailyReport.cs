@@ -3,7 +3,6 @@
 using System;
 using System.Linq;
 using System.Threading;
-using Shinden.Logger;
 
 namespace Sanakan.Services
 {
@@ -24,12 +23,12 @@ namespace Sanakan.Services
             {
                 var now = DateTime.Now;
                 var body = string.Join("\n", sections.Select(x => x()));
-                logger.Log($"Raport dobowy ({_since:yyyy-MM-dd HH:mm} - {now:yyyy-MM-dd HH:mm}):\n{body}");
+                logger.LogReport($"Daily ({_since:yyyy-MM-dd HH:mm} - {now:yyyy-MM-dd HH:mm}):\n{body}");
                 _since = now;
             }
             catch (Exception ex)
             {
-                logger.LogError($"Raport dobowy: {ex.Message}");
+                logger.LogError($"Report: daily: {ex.Message}");
             }
             finally
             {

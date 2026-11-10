@@ -31,16 +31,18 @@ namespace Artifacts
 
         public FakeConfig Config { get; } = new FakeConfig();
         public FakeExecutor Executor { get; } = new FakeExecutor();
+        public ListLogger Logger { get; } = new ListLogger();
+        public FakeBlacklist Blacklist { get; } = new FakeBlacklist();
+        public Sanakan.Services.Session.SessionManager Sessions { get; }
         public HttpClient Client { get; }
         private readonly IHost _host;
         private readonly LocalHttpServer _shindenServer;
 
         public ApiServer()
         {
-            Config.Model.ApiKeys = new List<SanakanApiKey> { new SanakanApiKey { Key = SiteKey, Bearer = "Shinden" } };
-            Config.Model.RMConfig = new List<RichMessageConfig>();
+            Config.Model.UserKeyApps.Add(new ApiApp { Key = SiteKey, Bearer = "Shinden", Permissions = ApiAppPermission.Site });
 
-            var logger = new ListLogger();
+            var logger = Logger;
             // JWT jest sprawdzany względem prawdziwego zegara, więc token musi być wystawiony "teraz"
             var time = new SystemTime();
             // lokalny "shinden", który na wszystko odpowiada 404
@@ -49,9 +51,12 @@ namespace Artifacts
                 ctx.Response.StatusCode = 404;
                 return Task.CompletedTask;
             });
-            var shinden = new Shinden.ShindenClient(new Shinden.Auth("token", "tests", "marmolade"), logger, Shinden.Logger.LogLevel.Information,
-                _shindenServer.BaseUrl, TimeSpan.FromSeconds(5));
-            var waifu = new Waifu(null, shinden, null, logger, null, null, null, time, null, null, Config);
+            var shinden = Sanakan.ShindenCompat.ShindenClient.Create(new ConfigShinden { Token = "token", UserAgent = "tests",
+                Marmolade = "marmolade", BaseUri = _shindenServer.BaseUrl }, null, null, TimeSpan.FromSeconds(5));
+            var shindenCache = new Sanakan.Services.Shinden(shinden, null, null, logger, time);
+            var waifu = new Waifu(null, shinden, null, logger, null, null, null, time, shindenCache, null, Config);
+            var discord = new DiscordSocketClient();
+            Sessions = new Sanakan.Services.Session.SessionManager(discord, Executor, logger);
 
             _host = new HostBuilder().ConfigureWebHost(web => web
                 .UseTestServer()
@@ -59,12 +64,16 @@ namespace Artifacts
                 {
                     BotWebHost.AddApiServices(services, Config);
                     services.AddSingleton((TagHelper)RuntimeHelpers.GetUninitializedObject(typeof(TagHelper)));
+                    services.AddSingleton((Sanakan.Services.Profile)RuntimeHelpers.GetUninitializedObject(typeof(Sanakan.Services.Profile)));
                     services.AddSingleton<ISystemTime>(time);
                     services.AddSingleton(waifu);
-                    services.AddSingleton<Shinden.Logger.ILogger>(logger);
-                    services.AddSingleton(new DiscordSocketClient());
+                    services.AddSingleton<Sanakan.ILogger>(logger);
+                    services.AddSingleton(discord);
+                    services.AddSingleton(Sessions);
+                    services.AddSingleton<IPlayerBlacklist>(Blacklist);
                     services.AddSingleton(new Sanakan.Services.Helper(Config, logger));
                     services.AddSingleton(shinden);
+                    services.AddSingleton(shindenCache);
                     services.AddSingleton<IExecutor>(Executor);
                     services.AddSingleton(new Expedition(time));
                 })
@@ -84,12 +93,21 @@ namespace Artifacts
 
         public static StringContent Json(string body) => new StringContent(body, Encoding.UTF8, "application/json");
 
+        public static Task<HttpResponseMessage> PostSiteEndpointAsync(HttpClient client)
+            => client.PostAsync("/api/waifu/cards/character/5/update", Json("{}"));
+
         public void Dispose()
         {
             Client.Dispose();
             _host.Dispose();
             _shindenServer.Dispose();
         }
+    }
+
+    public class FakeBlacklist : IPlayerBlacklist
+    {
+        public System.Collections.Concurrent.ConcurrentDictionary<ulong, bool> Users { get; } = new System.Collections.Concurrent.ConcurrentDictionary<ulong, bool>();
+        public Task<bool> IsBlacklistedAsync(ulong discordId) => Task.FromResult(Users.ContainsKey(discordId));
     }
 
     public class ApiResponseTests : IDisposable
@@ -126,6 +144,15 @@ namespace Artifacts
             Assert.Equal(HttpStatusCode.TooManyRequests, (await _api.Client.PostAsync("/api/token", ApiServer.Json($"\"{ApiServer.SiteKey}\""))).StatusCode);
         }
 
+        // the test config has no connection string, so the database access throws
+        [Fact]
+        public async Task UnhandledException_Returns500Json_AndIsLogged()
+        {
+            await AssertMessage(await _api.Client.GetAsync("/api/waifu/card/5/view"), HttpStatusCode.InternalServerError);
+
+            Assert.Contains(_api.Logger.Messages, x => x.StartsWith(Sanakan.LoggerExtensions.ErrorPrefix + "API: GET /api/waifu/card/5/view"));
+        }
+
         [Fact]
         public async Task SiteEndpoint_WithoutToken_Returns401()
         {
@@ -155,6 +182,46 @@ namespace Artifacts
         {
             var client = await _api.AsSiteAsync();
             await AssertMessage(await client.PostAsync("/api/waifu/shinden/5/boosterpack", ApiServer.Json("[]")), HttpStatusCode.InternalServerError);
+        }
+
+        [Fact]
+        public async Task GiveShindenPacks_InvalidIdempotencyKey_Returns400Json()
+        {
+            var client = await _api.AsSiteAsync();
+            var req = new HttpRequestMessage(HttpMethod.Post, "/api/waifu/shinden/5/boosterpack") { Content = ApiServer.Json("[]") };
+            req.Headers.Add("Idempotency-Key", new string('a', 65));
+            await AssertMessage(await client.SendAsync(req), HttpStatusCode.BadRequest);
+        }
+
+        [Theory]
+        [InlineData("discord", " ")]
+        [InlineData("shinden", " ")]
+        [InlineData("discord", "invalid key")]
+        [InlineData("shinden", "invalid key")]
+        public async Task ModifyTc_InvalidIdempotencyHeader_Returns400Json(string identifier, string key)
+        {
+            var client = await _api.AsSiteAsync();
+            var request = new HttpRequestMessage(HttpMethod.Put, $"/api/user/{identifier}/5/tc") { Content = ApiServer.Json("100") };
+            request.Headers.TryAddWithoutValidation("Idempotency-Key", new[] { key });
+
+            await AssertMessage(await client.SendAsync(request), HttpStatusCode.BadRequest);
+            Assert.Empty(_api.Executor.Added);
+        }
+
+        [Fact]
+        public async Task OpenShindenPacks_InvalidIdempotencyKey_Returns400Json()
+        {
+            var client = await _api.AsSiteAsync();
+            var req = new HttpRequestMessage(HttpMethod.Post, "/api/waifu/shinden/5/boosterpack/open") { Content = ApiServer.Json("[]") };
+            req.Headers.Add("Idempotency-Key", "zażółć");
+            await AssertMessage(await client.SendAsync(req), HttpStatusCode.BadRequest);
+        }
+
+        [Fact]
+        public async Task OpenShindenPacksStatus_InvalidKey_Returns400Json()
+        {
+            var client = await _api.AsSiteAsync();
+            await AssertMessage(await client.GetAsync("/api/waifu/shinden/5/boosterpack/open/" + new string('a', 65)), HttpStatusCode.BadRequest);
         }
 
         [Fact]
@@ -198,29 +265,13 @@ namespace Artifacts
             await AssertMessage(await client.PostAsync("/api/waifu/cards/character/5/update", ApiServer.Json("{}")), HttpStatusCode.OK);
             Assert.Single(_api.Executor.Added);
         }
-
-        [Fact]
-        public async Task RichMessageDelete_Unknown_Returns404Json()
-        {
-            var client = await _api.AsSiteAsync();
-            await AssertMessage(await client.DeleteAsync("/api/richmessage/123"), HttpStatusCode.NotFound);
-        }
-
-        [Fact]
-        public async Task RichMessageExample_Returns200()
-        {
-            var client = await _api.AsSiteAsync();
-            var res = await client.GetAsync("/api/richmessage");
-            Assert.Equal(HttpStatusCode.OK, res.StatusCode);
-            Assert.NotNull(JObject.Parse(await res.Content.ReadAsStringAsync()));
-        }
     }
 
     public class CardImageFileTests
     {
         private static async Task<(int status, string type, byte[] body)> ExecuteAsync(IActionResult result)
         {
-            var controller = ControllerHarness.Attach(new Sanakan.Api.Controllers.RichMessageController(null, new FakeConfig(), new ListLogger()));
+            var controller = ControllerHarness.Attach(new Sanakan.Api.Controllers.DebugController(null, new ListLogger()));
             await result.ExecuteResultAsync(controller.ControllerContext);
 
             var response = controller.HttpContext.Response;
